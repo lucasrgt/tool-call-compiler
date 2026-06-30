@@ -8,7 +8,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::task::JoinError;
 use tool_compiler_graph::GraphError;
-use tool_compiler_ir::{Node, NodeId, ValueRef};
+use tool_compiler_ir::{Effects, Node, NodeId, ToolCost, ToolLimits, ToolSpec, ValueRef};
 use tool_compiler_optimizer::OptimizationReport;
 
 mod conformance;
@@ -89,6 +89,42 @@ impl ToolCache for MemoryCache {
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
     adapters: BTreeMap<String, Arc<dyn ToolExecutor>>,
+    capabilities: BTreeMap<String, ToolCapabilities>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolCapabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects: Option<Effects>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ToolLimits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ToolCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
+}
+
+impl ToolCapabilities {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_effects(mut self, effects: Effects) -> Self {
+        self.effects = Some(effects);
+        self
+    }
+
+    pub fn with_limits(mut self, limits: ToolLimits) -> Self {
+        self.limits = Some(limits);
+        self
+    }
+
+    pub fn with_cost(mut self, cost: ToolCost) -> Self {
+        self.cost = Some(cost);
+        self
+    }
 }
 
 impl ToolRegistry {
@@ -113,8 +149,49 @@ impl ToolRegistry {
         self.adapters.insert(adapter.into(), Arc::new(executor));
     }
 
+    pub fn with_tool_capabilities(
+        mut self,
+        tool: impl Into<String>,
+        capabilities: ToolCapabilities,
+    ) -> Self {
+        self.register_tool_capabilities(tool, capabilities);
+        self
+    }
+
+    pub fn register_tool_capabilities(
+        &mut self,
+        tool: impl Into<String>,
+        capabilities: ToolCapabilities,
+    ) {
+        self.capabilities.insert(tool.into(), capabilities);
+    }
+
+    pub fn capabilities(&self, tool: &str) -> Option<&ToolCapabilities> {
+        self.capabilities.get(tool)
+    }
+
+    pub(crate) fn apply_capabilities(&self, plan: &mut tool_compiler_ir::Plan) {
+        for (tool, spec) in &mut plan.tools {
+            if let Some(capabilities) = self.capabilities.get(tool) {
+                merge_capabilities(spec, capabilities);
+            }
+        }
+    }
+
     fn executor(&self, adapter: &str) -> Option<Arc<dyn ToolExecutor>> {
         self.adapters.get(adapter).cloned()
+    }
+}
+
+fn merge_capabilities(spec: &mut ToolSpec, capabilities: &ToolCapabilities) {
+    if spec.effects.is_none() {
+        spec.effects = capabilities.effects.clone();
+    }
+    if spec.limits.is_none() {
+        spec.limits = capabilities.limits.clone();
+    }
+    if spec.cost.is_none() {
+        spec.cost = capabilities.cost.clone();
     }
 }
 
@@ -749,6 +826,36 @@ mod tests {
         let result = Runtime::from_registry(registry).run(plan).await.unwrap();
 
         assert_eq!(result.outputs["message"], json!({ "ok": true }));
+    }
+
+    #[tokio::test]
+    async fn registry_capabilities_hydrate_plan_tools() {
+        let mut plan = Plan::new();
+        plan.tools.insert("echo".into(), ToolSpec::new("custom"));
+        plan.nodes
+            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
+        plan.nodes
+            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
+        let registry = ToolRegistry::new()
+            .with_adapter(
+                "custom",
+                BatchExecutor {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    batches: Arc::new(AtomicUsize::new(0)),
+                },
+            )
+            .with_tool_capabilities(
+                "echo",
+                ToolCapabilities::new().with_effects(Effects {
+                    batchable: true,
+                    ..Effects::pure()
+                }),
+            );
+
+        let result = Runtime::from_registry(registry).run(plan).await.unwrap();
+
+        assert_eq!(result.optimization.batch_groups.len(), 1);
+        assert_eq!(result.optimization.summary.estimated_tool_calls_after, 1);
     }
 
     #[tokio::test]

@@ -1,0 +1,69 @@
+{
+  "version": "0",
+  "tools": {
+    "const": {
+      "adapter": "local",
+      "effects": {
+        "pure": true,
+        "idempotent": true,
+        "cacheable": true,
+        "commutative": true
+      }
+    }
+  },
+  "steps": [
+    {
+      "id": "map_context",
+      "tool": "const",
+      "input": {
+        "value": {
+          "goal": "map task creation flow",
+          "tools": ["codegraph_search", "codegraph_explore"]
+        }
+      }
+    },
+    {
+      "id": "inspect_frontend",
+      "tool": "const",
+      "input": {
+        "value": {
+          "target": "CreateTaskDialog/useCreateTaskModel",
+          "context": { "$ref": "map_context.output" }
+        }
+      }
+    },
+    {
+      "id": "inspect_backend",
+      "tool": "const",
+      "input": {
+        "value": {
+          "target": "activity creation slice",
+          "context": { "$ref": "map_context.output" }
+        }
+      }
+    },
+    {
+      "id": "fix_payload",
+      "tool": "const",
+      "after": ["inspect_frontend", "inspect_backend"],
+      "input": {
+        "value": {
+          "change": "align frontend payload with backend contract"
+        }
+      }
+    },
+    {
+      "id": "verify",
+      "tool": "const",
+      "input": {
+        "value": {
+          "checks": ["lint", "typecheck", "test", "doctor"],
+          "change": { "$ref": "fix_payload.output" }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "feedback": "verify.output"
+  }
+}

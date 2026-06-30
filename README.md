@@ -23,7 +23,7 @@ Internally, the runtime still executes multiple operations in sequence, parallel
 Agent systems often become slow because a model loop drives many tiny, serial, context-heavy tool calls. This project moves safe execution decisions into a deterministic runtime.
 
 ```text
-plan IR -> validation -> optimization -> DAG execution -> result + trace
+intent IR -> plan IR -> validation -> optimization -> DAG execution -> result + trace
 ```
 
 ## Moat
@@ -32,21 +32,26 @@ Batching and parallel execution are table stakes. The core moat is effect-safe c
 
 ## Workspace
 
-- `crates/tool-compiler-ir`: stable IR types and tool effect declarations.
+- `crates/tool-compiler-ir`: stable plan IR types and tool effect declarations.
 - `crates/tool-compiler-graph`: graph validation, dependency extraction, safe execution layers.
 - `crates/tool-compiler-optimizer`: pure graph transforms.
+- `crates/tool-compiler-planner`: agent intent IR compiled into executable plans.
 - `crates/tool-compiler-runtime`: async execution over validated plans.
 - `crates/tool-compiler-adapter-*`: adapter packages.
 - `sdk/node`: TypeScript builder SDK.
-- `schemas/plan.schema.json`: public JSON Schema for plan validation.
+- `schemas/plan.schema.json`: public JSON Schema for executable plans.
+- `schemas/intent.schema.json`: public JSON Schema for agent intent plans.
+- `docs/reference-projects.md`: notes from comparable open source projects pulled with `opensrc`.
 - `crates/xtask`: local quality gates.
 
 ## Try It
 
 ```powershell
 cargo run -p tool-compiler-cli -- run examples/sequential-ref.json
+cargo run -p tool-compiler-cli -- compile-intent examples/dogfood-aerofortress-intent.json
+cargo run -p tool-compiler-cli -- run-intent examples/dogfood-aerofortress-intent.json
 cargo run -p tool-compiler-cli -- explain examples/write-conflict.json
-cargo run -p tool-compiler-cli -- bench examples/bench-sleep.json --iterations 3
+cargo run -p tool-compiler-cli -- bench examples/bench-compiled-tool-calls.json --iterations 3
 cargo run -p tool-compiler-cli -- serve-mcp
 cargo run -p tool-compiler-cli -- run examples/fs-read.json --runtime-config examples/runtime.config.example.json
 cargo run -p tool-compiler-cli -- run examples/shell-rustc.json --runtime-config examples/runtime.config.example.json
@@ -59,7 +64,11 @@ The CLI ships with a deterministic `local` adapter for examples:
 - `write`: returns the input, but its declared effects can block parallelization.
 - `fail`: returns a tool error.
 
-`explain` reports optimization output, execution layers, batchable groups, and diagnostics such as missing effects or read/write conflicts.
+`compile-intent` lowers agent intent into the executable plan IR. `run-intent`
+does that compile step and immediately returns the same composite feedback as
+`run`.
+
+`explain` reports optimization output, execution layers, fused batch groups, summary counts, and diagnostics such as missing effects or read/write conflicts.
 
 For a live MCP filesystem smoke benchmark:
 
@@ -94,6 +103,12 @@ cache hits in the trace as `cache_hit`.
 Cache is pluggable through the `ToolCache` trait; `MemoryCache` is the default.
 Scheduler limits live on `ToolSpec.limits` and currently enforce `batch_size`
 and a conservative layer-level `max_concurrency` ceiling.
+Tool cost metadata lives on `ToolSpec.cost` and is included in the public schema
+for planning and benchmark reporting.
+
+`ToolRegistry` can also carry tool capabilities. When a plan only names the
+adapter, the runtime can hydrate effects, limits, and cost from the registry
+before optimization.
 
 Trace finish/error/cache events include `duration_ms`.
 

@@ -12,6 +12,12 @@ An explicit declarative description of tool nodes, dependencies, inputs, and req
 
 Avoid: "chain" when the structure can be a graph.
 
+## Intent Plan
+
+A higher-level agent-authored description of desired steps. It can omit derived dependencies because the planner compiles refs plus explicit `after` ordering into an executable Plan.
+
+Avoid: treating intent as trusted execution input.
+
 ## Compiled Tool Graph
 
 A validated and optimized plan executed as one composite tool call from the LLM's perspective. Internally it may run many operations; externally it returns one compact result/trace for the next LLM turn.
@@ -42,6 +48,12 @@ A same-layer set of compatible nodes that the optimizer selects for one adapter 
 
 Avoid: using "batch group" for arbitrary manual MCP aggregation.
 
+## Fusion Group
+
+A reported optimizer decision where multiple safe nodes are represented as one compiled dispatch strategy, currently `batch_call`. It is the public explanation of why tool calls before/after differ.
+
+Avoid: claiming fusion changes side-effect order without effects proving it.
+
 ## Conformance Suite
 
 A small adapter verification flow that proves the common runtime contract: echo round-trip, batch dispatch shape, and tool error propagation.
@@ -59,3 +71,9 @@ Avoid: using limits to describe side-effect safety.
 The runtime cache boundary used for pure or cacheable tool outputs. It is an adapter-independent contract, with memory as the default backend and external stores as replaceable implementations.
 
 Avoid: treating cache as an optimizer pass.
+
+## Tool Capability
+
+Registry metadata for a tool, including effects, limits, cost, and optional schemas. Capabilities let runtimes hydrate lightweight plans before optimization without trusting missing semantics.
+
+Avoid: duplicating adapter implementation details in capabilities.

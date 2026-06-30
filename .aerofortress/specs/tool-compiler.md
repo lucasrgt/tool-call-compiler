@@ -36,7 +36,8 @@ The compiler should move work from the LLM loop into deterministic runtime execu
 
 ```text
 agent intent or plan
--> typed IR
+-> intent IR
+-> typed plan IR
 -> validation
 -> optimization passes
 -> DAG execution
@@ -66,6 +67,7 @@ Every tool capability should declare:
 - `commutative`: order does not matter across compatible operations.
 - `timeout`: default execution deadline.
 - `retry_policy`: retryable errors and attempt limits.
+- `cost`: fixed latency, per-call latency, and token estimates for planning/benchmarking.
 
 Scheduler limits are separate from effects:
 
@@ -84,11 +86,13 @@ The optimizer must refuse transformations when effects are missing or ambiguous.
 ## Implemented Slice
 
 - Runtime registry maps adapter names to executors.
-- CLI supports `validate`, `layers`, `optimize`, `explain`, `run`, `bench`, and `serve-mcp`.
+- CLI supports `validate`, `layers`, `optimize`, `explain`, `compile-intent`, `run-intent`, `run`, `bench`, and `serve-mcp`.
 - `run` executes a compiled tool graph and returns JSON outputs, node outputs, trace, and optimization report.
-- `bench` compares serial baseline vs compiled execution and clears runtime cache between iterations.
-- Optimizer reports deduplicated nodes and batchable groups.
+- `bench` compares serial baseline vs compiled execution, clears runtime cache between iterations, and reports elapsed time, estimated tool calls, estimated LLM turns, trace events, cache hits, saved milliseconds, and speedup.
+- Planner crate compiles an agent intent IR into executable `Plan` JSON by deriving dependencies from refs plus explicit `after` ordering.
+- Optimizer reports deduplicated nodes, batchable groups, fused groups, and summary counts for tool calls and LLM turns before/after compilation.
 - Runtime executes optimizer-selected `batch_groups` through the `call_batch` adapter contract.
+- Runtime registry can hydrate tool effects, limits, and cost from registered capabilities before optimization.
 - Runtime caches `pure`/`cacheable` tool outputs through a pluggable `ToolCache` trait and reports cache hits in traces.
 - Trace finish/error/cache events include `duration_ms`.
 - Runtime exports an adapter conformance suite covering echo round-trip, batch contract, and tool error propagation.
@@ -97,4 +101,4 @@ The optimizer must refuse transformations when effects are missing or ambiguous.
 - Filesystem and shell adapters are runnable from CLI runtime config; HTTP adapter has an injectable client executor.
 - CLI can load runtime adapters from config and can expose the compiler itself as one MCP stdio tool.
 - Examples include a live MCP filesystem benchmark config.
-- Public plan JSON Schema lives in `schemas/plan.schema.json` and is mirrored by the TypeScript SDK.
+- Public plan JSON Schema lives in `schemas/plan.schema.json`; public intent JSON Schema lives in `schemas/intent.schema.json`; both are mirrored by the TypeScript SDK.

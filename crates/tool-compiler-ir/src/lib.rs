@@ -48,6 +48,8 @@ pub struct ToolSpec {
     pub effects: Option<Effects>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<ToolLimits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ToolCost>,
 }
 
 impl ToolSpec {
@@ -56,6 +58,7 @@ impl ToolSpec {
             adapter: adapter.into(),
             effects: None,
             limits: None,
+            cost: None,
         }
     }
 
@@ -68,6 +71,11 @@ impl ToolSpec {
         self.limits = Some(limits);
         self
     }
+
+    pub fn with_cost(mut self, cost: ToolCost) -> Self {
+        self.cost = Some(cost);
+        self
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +84,16 @@ pub struct ToolLimits {
     pub max_concurrency: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_size: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCost {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_call_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -323,5 +341,19 @@ mod tests {
 
         assert_eq!(value["limits"]["max_concurrency"], 2);
         assert_eq!(value["limits"]["batch_size"], 10);
+    }
+
+    #[test]
+    fn serializes_tool_cost_when_present() {
+        let spec = ToolSpec::new("test").with_cost(ToolCost {
+            fixed_ms: Some(50),
+            per_call_ms: Some(5),
+            tokens: Some(120),
+        });
+        let value = serde_json::to_value(spec).unwrap();
+
+        assert_eq!(value["cost"]["fixed_ms"], 50);
+        assert_eq!(value["cost"]["per_call_ms"], 5);
+        assert_eq!(value["cost"]["tokens"], 120);
     }
 }

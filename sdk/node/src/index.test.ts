@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  capabilities,
+  compileIntent,
+  cost,
+  intent,
   plan,
   PLAN_SCHEMA,
   pure,
@@ -51,12 +55,53 @@ test("tool limits can be layered onto specs", () => {
   assert.equal(PLAN_SCHEMA.properties.version.const, "0");
 });
 
+test("tool cost can be layered onto specs", () => {
+  const spec = cost(pure("local"), { fixed_ms: 50, tokens: 80 });
+
+  assert.equal(spec.cost?.fixed_ms, 50);
+  assert.equal(spec.cost?.tokens, 80);
+});
+
+test("capabilities clone adapter metadata", () => {
+  const caps = capabilities({
+    effects: { batchable: true, cacheable: true },
+    limits: { batch_size: 4 },
+  });
+
+  assert.equal(caps.effects?.batchable, true);
+  assert.equal(caps.limits?.batch_size, 4);
+});
+
+test("intent compiles refs and explicit ordering into plan dependencies", () => {
+  const source = intent()
+    .tool("echo", pure("local"))
+    .step("user", "echo", { id: "u_1" })
+    .step("profile", "echo", { user: ref(valueRef("user", ["id"])) }, ["audit"])
+    .output("profile", valueRef("profile"))
+    .toJSON();
+
+  const compiled = compileIntent(source);
+
+  assert.deepEqual(compiled.nodes[1]?.depends_on, ["audit", "user"]);
+  assert.equal(compiled.outputs.profile, "profile.output");
+});
+
 test("run result type matches composite tool feedback shape", () => {
   const result: RunResult = {
     outputs: { answer: "ok" },
     node_outputs: { step: { answer: "ok" } },
     trace: [{ node: "step", tool: "echo", status: "cache_hit", duration_ms: 0 }],
-    optimization: { deduplicated: [], batch_groups: [] },
+    optimization: {
+      deduplicated: [],
+      batch_groups: [],
+      fused_groups: [],
+      summary: {
+        estimated_tool_calls_before: 1,
+        estimated_tool_calls_after: 1,
+        estimated_llm_turns_before: 1,
+        estimated_llm_turns_after: 1,
+      },
+    },
   };
 
   assert.equal(result.outputs.answer, "ok");

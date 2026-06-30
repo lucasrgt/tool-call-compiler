@@ -28,7 +28,8 @@
       "properties": {
         "adapter": { "type": "string", "minLength": 1 },
         "effects": { "$ref": "#/$defs/effects" },
-        "limits": { "$ref": "#/$defs/limits" }
+        "limits": { "$ref": "#/$defs/limits" },
+        "cost": { "$ref": "#/$defs/cost" }
       }
     },
     "effects": {
@@ -52,6 +53,15 @@
       "properties": {
         "max_concurrency": { "type": "integer", "minimum": 1 },
         "batch_size": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fixed_ms": { "type": "integer", "minimum": 0 },
+        "per_call_ms": { "type": "integer", "minimum": 0 },
+        "tokens": { "type": "integer", "minimum": 0 }
       }
     },
     "retry": {

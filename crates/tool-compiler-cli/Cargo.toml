@@ -22,5 +22,6 @@ tool-compiler-adapter-shell = { path = "../tool-compiler-adapter-shell" }
 tool-compiler-graph.workspace = true
 tool-compiler-ir.workspace = true
 tool-compiler-optimizer.workspace = true
+tool-compiler-planner.workspace = true
 tool-compiler-runtime.workspace = true
 tokio.workspace = true

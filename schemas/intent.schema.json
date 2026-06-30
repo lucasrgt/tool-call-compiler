@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tool-call-compiler.dev/schemas/intent.schema.json",
+  "title": "Tool Call Compiler Intent Plan",
+  "type": "object",
+  "required": ["version", "tools", "steps", "outputs"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": "0" },
+    "tools": {
+      "type": "object",
+      "additionalProperties": { "$ref": "plan.schema.json#/$defs/toolSpec" }
+    },
+    "steps": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/step" }
+    },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "step": {
+      "type": "object",
+      "required": ["id", "tool"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "tool": { "type": "string", "minLength": 1 },
+        "input": true,
+        "after": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

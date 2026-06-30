@@ -1,0 +1,38 @@
+{
+  "version": "0",
+  "tools": {
+    "const": {
+      "adapter": "local",
+      "effects": {
+        "pure": true,
+        "idempotent": true,
+        "cacheable": true,
+        "batchable": true,
+        "commutative": true
+      },
+      "limits": {
+        "batch_size": 10
+      },
+      "cost": {
+        "fixed_ms": 50,
+        "per_call_ms": 50,
+        "tokens": 80
+      }
+    }
+  },
+  "nodes": [
+    { "id": "step_01", "tool": "const", "input": { "sleep_ms": 50, "value": "01" } },
+    { "id": "step_02", "tool": "const", "input": { "sleep_ms": 50, "value": "02" } },
+    { "id": "step_03", "tool": "const", "input": { "sleep_ms": 50, "value": "03" } },
+    { "id": "step_04", "tool": "const", "input": { "sleep_ms": 50, "value": "04" } },
+    { "id": "step_05", "tool": "const", "input": { "sleep_ms": 50, "value": "05" } },
+    { "id": "step_06", "tool": "const", "input": { "sleep_ms": 50, "value": "06" } },
+    { "id": "step_07", "tool": "const", "input": { "sleep_ms": 50, "value": "07" } },
+    { "id": "step_08", "tool": "const", "input": { "sleep_ms": 50, "value": "08" } },
+    { "id": "step_09", "tool": "const", "input": { "sleep_ms": 50, "value": "09" } },
+    { "id": "step_10", "tool": "const", "input": { "sleep_ms": 50, "value": "10" } }
+  ],
+  "outputs": {
+    "last": "step_10.output"
+  }
+}

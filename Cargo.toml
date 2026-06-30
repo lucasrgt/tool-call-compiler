@@ -8,6 +8,7 @@ members = [
   "crates/tool-compiler-graph",
   "crates/tool-compiler-ir",
   "crates/tool-compiler-optimizer",
+  "crates/tool-compiler-planner",
   "crates/tool-compiler-runtime",
   "crates/xtask",
 ]
@@ -30,4 +31,5 @@ tokio = { version = "1.45.1", features = ["io-util", "macros", "process", "rt-mu
 tool-compiler-graph = { path = "crates/tool-compiler-graph" }
 tool-compiler-ir = { path = "crates/tool-compiler-ir" }
 tool-compiler-optimizer = { path = "crates/tool-compiler-optimizer" }
+tool-compiler-planner = { path = "crates/tool-compiler-planner" }
 tool-compiler-runtime = { path = "crates/tool-compiler-runtime" }

@@ -30,6 +30,8 @@ impl OptimizedPlan {
 pub struct OptimizationReport {
     pub deduplicated: Vec<DeduplicatedNode>,
     pub batch_groups: Vec<BatchGroup>,
+    pub fused_groups: Vec<FusedGroup>,
+    pub summary: OptimizationSummary,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +45,22 @@ pub struct BatchGroup {
     pub adapter: String,
     pub tool: String,
     pub nodes: Vec<NodeId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FusedGroup {
+    pub adapter: String,
+    pub tool: String,
+    pub nodes: Vec<NodeId>,
+    pub strategy: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptimizationSummary {
+    pub estimated_tool_calls_before: usize,
+    pub estimated_tool_calls_after: usize,
+    pub estimated_llm_turns_before: usize,
+    pub estimated_llm_turns_after: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,17 +78,50 @@ pub struct Diagnostic {
 }
 
 pub fn optimize(plan: Plan) -> Result<OptimizedPlan, GraphError> {
+    let original_node_count = plan.nodes.len();
     validate(&plan)?;
 
     let (plan, mut report) = deduplicate_nodes(plan);
     let graph = validate(&plan)?;
     report.batch_groups = find_batch_groups(&plan, &graph);
+    report.fused_groups = report
+        .batch_groups
+        .iter()
+        .map(|group| FusedGroup {
+            adapter: group.adapter.clone(),
+            tool: group.tool.clone(),
+            nodes: group.nodes.clone(),
+            strategy: "batch_call".into(),
+        })
+        .collect();
+    report.summary = summarize(original_node_count, plan.nodes.len(), &report.batch_groups);
 
     Ok(OptimizedPlan {
         plan,
         graph,
         report,
     })
+}
+
+fn summarize(
+    original_node_count: usize,
+    optimized_node_count: usize,
+    batch_groups: &[BatchGroup],
+) -> OptimizationSummary {
+    let batched_nodes = batch_groups
+        .iter()
+        .map(|group| group.nodes.len())
+        .sum::<usize>();
+    let estimated_tool_calls_after = optimized_node_count
+        .saturating_sub(batched_nodes)
+        .saturating_add(batch_groups.len());
+
+    OptimizationSummary {
+        estimated_tool_calls_before: original_node_count,
+        estimated_tool_calls_after,
+        estimated_llm_turns_before: original_node_count,
+        estimated_llm_turns_after: usize::from(original_node_count > 0),
+    }
 }
 
 pub fn explain(plan: Plan) -> Result<ExplainReport, GraphError> {
@@ -391,6 +442,45 @@ mod tests {
                 tool: "lookup".into(),
                 nodes: vec!["a".into(), "b".into()],
             }]
+        );
+        assert_eq!(
+            optimized.report().fused_groups,
+            vec![FusedGroup {
+                adapter: "test".into(),
+                tool: "lookup".into(),
+                nodes: vec!["a".into(), "b".into()],
+                strategy: "batch_call".into(),
+            }]
+        );
+        assert_eq!(
+            optimized.report().summary,
+            OptimizationSummary {
+                estimated_tool_calls_before: 2,
+                estimated_tool_calls_after: 1,
+                estimated_llm_turns_before: 2,
+                estimated_llm_turns_after: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn summary_accounts_for_deduplicated_nodes() {
+        let mut plan = plan();
+        plan.nodes
+            .push(Node::new("a", "lookup").with_input(json!({ "q": "x" })));
+        plan.nodes
+            .push(Node::new("b", "lookup").with_input(json!({ "q": "x" })));
+
+        let optimized = optimize(plan).unwrap();
+
+        assert_eq!(
+            optimized.report().summary,
+            OptimizationSummary {
+                estimated_tool_calls_before: 2,
+                estimated_tool_calls_after: 1,
+                estimated_llm_turns_before: 2,
+                estimated_llm_turns_after: 1,
+            }
         );
     }
 

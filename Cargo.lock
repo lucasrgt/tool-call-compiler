@@ -376,6 +376,7 @@ dependencies = [
  "tool-compiler-graph",
  "tool-compiler-ir",
  "tool-compiler-optimizer",
+ "tool-compiler-planner",
  "tool-compiler-runtime",
 ]
 
@@ -404,6 +405,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tool-compiler-graph",
+ "tool-compiler-ir",
+]
+
+[[package]]
+name = "tool-compiler-planner"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
  "tool-compiler-ir",
 ]
 

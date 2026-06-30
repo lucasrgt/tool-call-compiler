@@ -14,7 +14,11 @@ use tool_compiler_adapter_shell::ShellExecutor;
 use tool_compiler_graph::validate;
 use tool_compiler_ir::Plan;
 use tool_compiler_optimizer::{explain, optimize};
-use tool_compiler_runtime::{Runtime, ToolExecutionError, ToolExecutor, ToolRegistry};
+use tool_compiler_planner::{IntentPlan, compile_intent};
+use tool_compiler_runtime::{
+    BatchInput, BatchOutput, RunResult, Runtime, ToolExecutionError, ToolExecutor, ToolRegistry,
+    TraceStatus,
+};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -36,6 +40,14 @@ enum Command {
     },
     Explain {
         plan: PathBuf,
+    },
+    CompileIntent {
+        intent: PathBuf,
+    },
+    RunIntent {
+        intent: PathBuf,
+        #[arg(long = "runtime-config", alias = "mcp-config")]
+        runtime_config: Option<PathBuf>,
     },
     Run {
         plan: PathBuf,
@@ -79,6 +91,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let plan = read_plan(plan)?;
             println!("{}", serde_json::to_string_pretty(&explain(plan)?)?);
         }
+        Command::CompileIntent { intent } => {
+            let intent = read_intent(intent)?;
+            let plan = compile_intent(intent)?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Command::RunIntent {
+            intent,
+            runtime_config,
+        } => {
+            let intent = read_intent(intent)?;
+            let plan = compile_intent(intent)?;
+            let result = configured_runtime(runtime_config)?.run(plan).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
         Command::Run {
             plan,
             runtime_config,
@@ -96,14 +122,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let iterations = iterations.max(1);
             let baseline = configured_runtime(runtime_config.clone())?;
             let compiled = configured_runtime(runtime_config)?;
-            let baseline_ms = bench(&baseline, &plan, iterations, false).await?;
-            let compiled_ms = bench(&compiled, &plan, iterations, true).await?;
+            let baseline = bench(&baseline, &plan, iterations, false).await?;
+            let compiled = bench(&compiled, &plan, iterations, true).await?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&BenchResult {
                     iterations,
-                    baseline_ms,
-                    compiled_ms,
+                    saved_ms: baseline.elapsed_ms as i128 - compiled.elapsed_ms as i128,
+                    speedup: speedup(baseline.elapsed_ms, compiled.elapsed_ms),
+                    baseline,
+                    compiled,
                 })?
             );
         }
@@ -116,6 +144,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn read_plan(path: PathBuf) -> Result<Plan, Box<dyn Error>> {
+    let content = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&content)?)
+}
+
+fn read_intent(path: PathBuf) -> Result<IntentPlan, Box<dyn Error>> {
     let content = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&content)?)
 }
@@ -160,24 +193,81 @@ async fn bench(
     plan: &Plan,
     iterations: u32,
     compiled: bool,
-) -> Result<u128, Box<dyn Error>> {
+) -> Result<BenchStats, Box<dyn Error>> {
     let started = Instant::now();
+    let mut estimated_tool_calls = 0;
+    let mut estimated_llm_turns = 0;
+    let mut trace_events = 0;
+    let mut cache_hits = 0;
+
     for _ in 0..iterations {
         runtime.clear_cache().await;
-        if compiled {
-            runtime.run(plan.clone()).await?;
+        let result = if compiled {
+            runtime.run(plan.clone()).await?
         } else {
-            runtime.run_serial(plan.clone()).await?;
-        }
+            runtime.run_serial(plan.clone()).await?
+        };
+        let stats = run_stats(&result, compiled);
+        estimated_tool_calls += stats.estimated_tool_calls;
+        estimated_llm_turns += stats.estimated_llm_turns;
+        trace_events += stats.trace_events;
+        cache_hits += stats.cache_hits;
     }
-    Ok(started.elapsed().as_millis())
+    Ok(BenchStats {
+        elapsed_ms: started.elapsed().as_millis(),
+        estimated_tool_calls,
+        estimated_llm_turns,
+        trace_events,
+        cache_hits,
+    })
 }
 
 #[derive(Serialize)]
 struct BenchResult {
     iterations: u32,
-    baseline_ms: u128,
-    compiled_ms: u128,
+    baseline: BenchStats,
+    compiled: BenchStats,
+    saved_ms: i128,
+    speedup: f64,
+}
+
+#[derive(Default, Serialize)]
+struct BenchStats {
+    elapsed_ms: u128,
+    estimated_tool_calls: usize,
+    estimated_llm_turns: usize,
+    trace_events: usize,
+    cache_hits: usize,
+}
+
+fn run_stats(result: &RunResult, compiled: bool) -> BenchStats {
+    let summary = &result.optimization.summary;
+    BenchStats {
+        elapsed_ms: 0,
+        estimated_tool_calls: if compiled {
+            summary.estimated_tool_calls_after
+        } else {
+            result.node_outputs.len()
+        },
+        estimated_llm_turns: if compiled {
+            summary.estimated_llm_turns_after
+        } else {
+            result.node_outputs.len()
+        },
+        trace_events: result.trace.len(),
+        cache_hits: result
+            .trace
+            .iter()
+            .filter(|event| event.status == TraceStatus::CacheHit)
+            .count(),
+    }
+}
+
+fn speedup(baseline_ms: u128, compiled_ms: u128) -> f64 {
+    if compiled_ms == 0 {
+        return 0.0;
+    }
+    baseline_ms as f64 / compiled_ms as f64
 }
 
 #[derive(Deserialize)]
@@ -342,11 +432,40 @@ impl ToolExecutor for LocalExecutor {
             tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
         }
 
-        match tool {
-            "const" => Ok(input.get("value").cloned().unwrap_or(input)),
-            "echo" | "write" => Ok(input),
-            "fail" => Err(ToolExecutionError::new("local fail tool was called")),
-            other => Ok(json!({ "tool": other, "input": input })),
+        local_output(tool, input)
+    }
+
+    async fn call_batch(
+        &self,
+        tool: &str,
+        inputs: Vec<BatchInput>,
+    ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
+        let max_sleep_ms = inputs
+            .iter()
+            .filter_map(|input| input.input.get("sleep_ms").and_then(Value::as_u64))
+            .max()
+            .unwrap_or(0);
+        if max_sleep_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(max_sleep_ms)).await;
         }
+
+        inputs
+            .into_iter()
+            .map(|input| {
+                Ok(BatchOutput {
+                    node: input.node,
+                    output: local_output(tool, input.input)?,
+                })
+            })
+            .collect()
+    }
+}
+
+fn local_output(tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
+    match tool {
+        "const" => Ok(input.get("value").cloned().unwrap_or(input)),
+        "echo" | "write" => Ok(input),
+        "fail" => Err(ToolExecutionError::new("local fail tool was called")),
+        other => Ok(json!({ "tool": other, "input": input })),
     }
 }

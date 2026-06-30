@@ -8,9 +8,9 @@ provenance: observado
 evidence: C:\Users\lucas\dev\tool-call-compiler\CONTEXT.md
 decay: stable
 created: 2026-06-30T18:03:43.344510900+00:00
-updated: 2026-06-30T19:17:20.627900300+00:00
-validated: 2026-06-30T19:17:20.627900300+00:00
+updated: 2026-06-30T19:42:50.117927300+00:00
+validated: 2026-06-30T19:42:50.117927300+00:00
 links: 
 ---
 
-Glossário canônico do domínio tool-call-compiler. Define Tool Call Compiler, Tool Plan, Tool Graph, Compiled Tool Call, Tool Adapter, Tool Effect, Tool Limit, Tool Cache, Composite Tool Feedback, Tool Call Boundary e reforça termos evitados como MCP-only compiler/automation macro/browser clicker.
+Glossário canônico do domínio tool-call-compiler. Define Tool Call, Plan, Intent Plan, Compiled Tool Graph, Effect, Adapter, Runtime, Batch Group, Fusion Group, Conformance Suite, Tool Limit, Tool Cache e Tool Capability, com termos evitados para manter a arquitetura agnóstica e effect-safe.

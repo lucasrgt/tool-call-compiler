@@ -44,12 +44,14 @@ impl Runtime {
         }
     }
 
-    pub async fn run(&self, plan: Plan) -> Result<RunResult, RuntimeError> {
+    pub async fn run(&self, mut plan: Plan) -> Result<RunResult, RuntimeError> {
+        self.registry.apply_capabilities(&mut plan);
         let optimized = optimize(plan)?;
         self.run_optimized(optimized).await
     }
 
-    pub async fn run_serial(&self, plan: Plan) -> Result<RunResult, RuntimeError> {
+    pub async fn run_serial(&self, mut plan: Plan) -> Result<RunResult, RuntimeError> {
+        self.registry.apply_capabilities(&mut plan);
         let graph = validate(&plan)?;
         let layers = graph
             .layers()
