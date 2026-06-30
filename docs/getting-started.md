@@ -25,6 +25,7 @@ import { tc } from "@tool-compiler/sdk-node";
 
 const recipe = tc
   .recipe(tc.fanOut("read_file", ["README.md", "Cargo.toml"], { inputKey: "path" }))
+  .name("read project docs")
   .tool("read_file", tc.effects.readOnly("fs.repo", ["fs:repo"]))
   .output("readme", tc.valueRef("item_1"))
   .toJSON();
@@ -33,6 +34,9 @@ const recipe = tc
 The SDK builds stable JSON for plan, intent, and recipe inputs. A host can send
 that JSON to a Rust runtime, an MCP server wrapper, or a language-specific
 adapter.
+
+`recipe` is the execution shape. `name` is optional metadata for humans: hosts
+should use it in transcripts, traces, and benchmark labels.
 
 ## MCP Server Wrapper
 
@@ -60,4 +64,3 @@ npm test
 
 The Rust LOC gate counts production lines only; inline tests do not count toward
 the 500 LOC ceiling.
-

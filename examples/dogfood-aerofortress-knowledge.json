@@ -1,5 +1,6 @@
 {
   "version": "0",
+  "name": "aerofortress knowledge fanout",
   "tools": {
     "knowledge_lookup": {
       "adapter": "local",

@@ -91,12 +91,14 @@ test("intent compiles refs and explicit ordering into plan dependencies", () => 
 test("recipe compiles fan-out into independent plan nodes", () => {
   const source = tc
     .recipe(fanOut("read", ["a.md", "b.md"], { nodePrefix: "file_", inputKey: "path" }))
+    .name("read docs")
     .tool("read", pure("fs.repo"))
     .output("first", valueRef("file_1"))
     .toJSON();
 
   const compiled = compileRecipe(source);
 
+  assert.equal(source.name, "read docs");
   assert.equal(compiled.nodes.length, 2);
   assert.equal(compiled.nodes[0]?.id, "file_1");
   assert.deepEqual(compiled.nodes[0]?.input, { path: "a.md" });

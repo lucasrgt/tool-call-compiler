@@ -94,6 +94,7 @@ export type Recipe = FanOutRecipe;
 
 export interface RecipePlan {
   version: "0";
+  name?: string;
   tools: Record<string, ToolSpec>;
   recipe: Recipe;
   outputs: Record<string, string>;
@@ -246,6 +247,11 @@ export class RecipeBuilder {
       recipe: structuredClone(recipeValue),
       outputs: {},
     };
+  }
+
+  name(name: string): this {
+    this.value.name = name;
+    return this;
   }
 
   tool(name: string, spec: ToolSpec): this {
@@ -516,6 +522,7 @@ export const INTENT_SCHEMA = {
   additionalProperties: false,
   properties: {
     version: { const: "0" },
+    name: { type: "string", minLength: 1 },
     tools: {
       type: "object",
       additionalProperties: { $ref: "plan.schema.json#/$defs/toolSpec" },

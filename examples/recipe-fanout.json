@@ -1,5 +1,6 @@
 {
   "version": "0",
+  "name": "read project files",
   "tools": {
     "echo": {
       "adapter": "local",

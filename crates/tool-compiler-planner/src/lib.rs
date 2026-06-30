@@ -48,6 +48,8 @@ pub struct IntentStep {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RecipePlan {
     pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default)]
     pub tools: BTreeMap<ToolName, ToolSpec>,
     pub recipe: Recipe,
@@ -59,10 +61,16 @@ impl RecipePlan {
     pub fn new(recipe: Recipe) -> Self {
         Self {
             version: CURRENT_VERSION.to_owned(),
+            name: None,
             tools: BTreeMap::new(),
             recipe,
             outputs: BTreeMap::new(),
         }
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 }
 
@@ -261,7 +269,8 @@ mod tests {
             FanOutRecipe::new("echo", [json!("a"), json!("b")])
                 .with_node_prefix("read_")
                 .with_input_key("path"),
-        ));
+        ))
+        .with_name("read docs");
         recipe.tools.insert(
             "echo".into(),
             ToolSpec::new("test").with_effects(Effects::pure()),
@@ -276,5 +285,17 @@ mod tests {
         assert_eq!(plan.nodes[0].id, "read_1");
         assert_eq!(plan.nodes[0].input, json!({ "path": "a" }));
         assert_eq!(plan.outputs["first"], ValueRef::output("read_1"));
+    }
+
+    #[test]
+    fn recipe_name_is_metadata_only() {
+        let recipe = RecipePlan::new(Recipe::FanOut(FanOutRecipe::new("echo", [json!("a")])))
+            .with_name("lookup docs");
+
+        let value = serde_json::to_value(&recipe).unwrap();
+        let plan = compile_recipe(recipe).unwrap();
+
+        assert_eq!(value["name"], "lookup docs");
+        assert_eq!(plan.nodes.len(), 1);
     }
 }
