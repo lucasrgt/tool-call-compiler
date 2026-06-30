@@ -1,0 +1,41 @@
+{
+  "version": "0",
+  "tools": {
+    "const": {
+      "adapter": "local",
+      "effects": {
+        "pure": true,
+        "idempotent": true,
+        "cacheable": true,
+        "batchable": true,
+        "commutative": true
+      }
+    }
+  },
+  "nodes": [
+    {
+      "id": "user",
+      "tool": "const",
+      "input": {
+        "value": {
+          "id": "u_1"
+        }
+      }
+    },
+    {
+      "id": "orders",
+      "tool": "const",
+      "input": {
+        "value": [
+          "o_1",
+          "o_2"
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "user": "user.output",
+    "orders": "orders.output"
+  }
+}
+

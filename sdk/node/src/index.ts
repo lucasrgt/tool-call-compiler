@@ -54,6 +54,25 @@ export interface DeduplicatedNode {
 
 export interface OptimizationReport {
   deduplicated: DeduplicatedNode[];
+  batch_groups: BatchGroup[];
+}
+
+export interface BatchGroup {
+  adapter: string;
+  tool: string;
+  nodes: string[];
+}
+
+export interface Diagnostic {
+  kind: string;
+  nodes: string[];
+  message: string;
+}
+
+export interface ExplainReport {
+  layers: string[][];
+  optimization: OptimizationReport;
+  diagnostics: Diagnostic[];
 }
 
 export type TraceStatus = "started" | "finished" | { failed: string };

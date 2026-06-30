@@ -75,3 +75,13 @@ The optimizer must refuse transformations when effects are missing or ambiguous.
 - Lines inside `#[cfg(test)] mod tests` do not count as production LOC.
 - Minimum line coverage: 95%.
 - Coverage command: `cargo llvm-cov --workspace --lib --tests --fail-under-lines 95`.
+
+## Implemented Slice
+
+- Runtime registry maps adapter names to executors.
+- CLI supports `validate`, `layers`, `optimize`, `explain`, `run`, and `bench`.
+- `run` executes a compiled tool graph and returns JSON outputs, node outputs, trace, and optimization report.
+- `bench` compares serial baseline vs compiled execution with the local adapter.
+- Optimizer reports deduplicated nodes and batchable groups.
+- Explain diagnostics report why safe parallelization was blocked.
+- MCP adapter has a typed server/tool binding skeleton.

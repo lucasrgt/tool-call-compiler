@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tool_compiler_graph::{ExecutionGraph, GraphError, validate};
-use tool_compiler_ir::{Node, NodeId, Plan, REF_KEY, ValueRef};
+use tool_compiler_ir::{Node, NodeId, Plan, REF_KEY, ToolSpec, ValueRef};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct OptimizedPlan {
@@ -29,6 +29,7 @@ impl OptimizedPlan {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OptimizationReport {
     pub deduplicated: Vec<DeduplicatedNode>,
+    pub batch_groups: Vec<BatchGroup>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,16 +38,49 @@ pub struct DeduplicatedNode {
     pub canonical: NodeId,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchGroup {
+    pub adapter: String,
+    pub tool: String,
+    pub nodes: Vec<NodeId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExplainReport {
+    pub layers: Vec<Vec<NodeId>>,
+    pub optimization: OptimizationReport,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Diagnostic {
+    pub kind: String,
+    pub nodes: Vec<NodeId>,
+    pub message: String,
+}
+
 pub fn optimize(plan: Plan) -> Result<OptimizedPlan, GraphError> {
     validate(&plan)?;
 
-    let (plan, report) = deduplicate_nodes(plan);
+    let (plan, mut report) = deduplicate_nodes(plan);
     let graph = validate(&plan)?;
+    report.batch_groups = find_batch_groups(&plan, &graph);
 
     Ok(OptimizedPlan {
         plan,
         graph,
         report,
+    })
+}
+
+pub fn explain(plan: Plan) -> Result<ExplainReport, GraphError> {
+    let optimized = optimize(plan)?;
+    let diagnostics = explain_parallel_boundaries(optimized.plan(), optimized.graph());
+
+    Ok(ExplainReport {
+        layers: optimized.graph().layers().to_vec(),
+        optimization: optimized.report().clone(),
+        diagnostics,
     })
 }
 
@@ -80,6 +114,110 @@ fn deduplicate_nodes(mut plan: Plan) -> (Plan, OptimizationReport) {
     rewrite_outputs(&mut plan, &aliases);
 
     (plan, report)
+}
+
+fn find_batch_groups(plan: &Plan, graph: &ExecutionGraph) -> Vec<BatchGroup> {
+    let mut groups = Vec::new();
+
+    for layer in graph.layers() {
+        let mut by_tool = BTreeMap::<String, Vec<NodeId>>::new();
+        for node_id in layer {
+            let Some(node) = plan.nodes.iter().find(|node| &node.id == node_id) else {
+                continue;
+            };
+            let is_batchable = plan
+                .tools
+                .get(&node.tool)
+                .and_then(|tool| tool.effects.as_ref())
+                .is_some_and(|effects| effects.batchable);
+
+            if is_batchable {
+                by_tool
+                    .entry(node.tool.clone())
+                    .or_default()
+                    .push(node.id.clone());
+            }
+        }
+
+        for (tool, nodes) in by_tool {
+            if nodes.len() > 1 {
+                let adapter = plan
+                    .tools
+                    .get(&tool)
+                    .map(|spec| spec.adapter.clone())
+                    .unwrap_or_default();
+                groups.push(BatchGroup {
+                    adapter,
+                    tool,
+                    nodes,
+                });
+            }
+        }
+    }
+
+    groups
+}
+
+fn explain_parallel_boundaries(plan: &Plan, graph: &ExecutionGraph) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let layer_index = layer_index(graph);
+
+    for (left_index, left) in plan.nodes.iter().enumerate() {
+        for right in plan.nodes.iter().skip(left_index + 1) {
+            if layer_index.get(&left.id) == layer_index.get(&right.id) {
+                continue;
+            }
+            if depends_on(graph, &left.id, &right.id) || depends_on(graph, &right.id, &left.id) {
+                continue;
+            }
+            if let Some(message) =
+                parallel_blocker(plan.tools.get(&left.tool), plan.tools.get(&right.tool))
+            {
+                diagnostics.push(Diagnostic {
+                    kind: "not_parallelized".into(),
+                    nodes: vec![left.id.clone(), right.id.clone()],
+                    message,
+                });
+            }
+        }
+    }
+
+    diagnostics
+}
+
+fn layer_index(graph: &ExecutionGraph) -> BTreeMap<NodeId, usize> {
+    let mut indexes = BTreeMap::new();
+    for (index, layer) in graph.layers().iter().enumerate() {
+        for node in layer {
+            indexes.insert(node.clone(), index);
+        }
+    }
+    indexes
+}
+
+fn depends_on(graph: &ExecutionGraph, node: &str, dependency: &str) -> bool {
+    graph
+        .dependencies()
+        .get(node)
+        .is_some_and(|dependencies| dependencies.contains(dependency))
+}
+
+fn parallel_blocker(left: Option<&ToolSpec>, right: Option<&ToolSpec>) -> Option<String> {
+    let left = left?;
+    let right = right?;
+
+    match (left.effects.as_ref(), right.effects.as_ref()) {
+        (None, _) | (_, None) => Some("missing effects prevent safe parallelization".into()),
+        (Some(left), Some(right)) => {
+            if !left.writes.is_disjoint(&right.writes) {
+                return Some("both tools write the same resource".into());
+            }
+            if !left.writes.is_disjoint(&right.reads) || !right.writes.is_disjoint(&left.reads) {
+                return Some("read/write effects touch the same resource".into());
+            }
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -227,6 +365,49 @@ mod tests {
 
         assert!(optimized.report().deduplicated.is_empty());
         assert_eq!(optimized.plan().nodes.len(), 2);
+    }
+
+    #[test]
+    fn reports_batchable_groups_in_safe_layers() {
+        let mut plan = Plan::new();
+        plan.tools.insert(
+            "lookup".into(),
+            ToolSpec::new("test").with_effects(Effects {
+                batchable: true,
+                ..Effects::pure()
+            }),
+        );
+        plan.nodes
+            .push(Node::new("a", "lookup").with_input(json!({ "q": "a" })));
+        plan.nodes
+            .push(Node::new("b", "lookup").with_input(json!({ "q": "b" })));
+
+        let optimized = optimize(plan).unwrap();
+
+        assert_eq!(
+            optimized.report().batch_groups,
+            vec![BatchGroup {
+                adapter: "test".into(),
+                tool: "lookup".into(),
+                nodes: vec!["a".into(), "b".into()],
+            }]
+        );
+    }
+
+    #[test]
+    fn explains_parallel_blockers() {
+        let mut plan = Plan::new();
+        plan.tools.insert("unknown".into(), ToolSpec::new("test"));
+        plan.nodes.push(Node::new("a", "unknown"));
+        plan.nodes.push(Node::new("b", "unknown"));
+
+        let report = explain(plan).unwrap();
+
+        assert_eq!(
+            report.layers,
+            vec![vec!["a".to_owned()], vec!["b".to_owned()]]
+        );
+        assert_eq!(report.diagnostics[0].kind, "not_parallelized");
     }
 
     #[test]

@@ -282,11 +282,15 @@ dependencies = [
 name = "tool-compiler-cli"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "clap",
+ "serde",
  "serde_json",
+ "tokio",
  "tool-compiler-graph",
  "tool-compiler-ir",
  "tool-compiler-optimizer",
+ "tool-compiler-runtime",
 ]
 
 [[package]]

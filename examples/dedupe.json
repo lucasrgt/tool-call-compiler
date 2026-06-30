@@ -1,0 +1,38 @@
+{
+  "version": "0",
+  "tools": {
+    "const": {
+      "adapter": "local",
+      "effects": {
+        "pure": true,
+        "idempotent": true,
+        "cacheable": true,
+        "commutative": true
+      }
+    }
+  },
+  "nodes": [
+    {
+      "id": "first",
+      "tool": "const",
+      "input": {
+        "value": {
+          "id": "same"
+        }
+      }
+    },
+    {
+      "id": "second",
+      "tool": "const",
+      "input": {
+        "value": {
+          "id": "same"
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "result": "second.output"
+  }
+}
+

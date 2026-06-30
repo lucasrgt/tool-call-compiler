@@ -2,6 +2,39 @@ use tool_compiler_ir::{Effects, ToolSpec};
 
 pub const ADAPTER: &str = "mcp";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub transport: McpTransport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum McpTransport {
+    Stdio { command: String, args: Vec<String> },
+    WebSocket { url: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpToolBinding {
+    pub server: McpServerConfig,
+    pub tool_name: String,
+    pub spec: ToolSpec,
+}
+
+impl McpToolBinding {
+    pub fn new(server: McpServerConfig, tool_name: impl Into<String>, spec: ToolSpec) -> Self {
+        Self {
+            server,
+            tool_name: tool_name.into(),
+            spec,
+        }
+    }
+
+    pub fn tool_key(&self) -> String {
+        format!("{}:{}", self.server.name, self.tool_name)
+    }
+}
+
 pub fn pure_tool() -> ToolSpec {
     ToolSpec::new(ADAPTER).with_effects(Effects::pure())
 }
@@ -50,5 +83,23 @@ mod tests {
 
         assert!(effects.reads.contains("mcp:resource"));
         assert!(effects.writes.is_empty());
+    }
+
+    #[test]
+    fn binding_builds_stable_tool_keys() {
+        let binding = McpToolBinding::new(
+            McpServerConfig {
+                name: "filesystem".into(),
+                transport: McpTransport::Stdio {
+                    command: "node".into(),
+                    args: vec!["server.js".into()],
+                },
+            },
+            "read_file",
+            read_tool(["fs:workspace"]),
+        );
+
+        assert_eq!(binding.tool_key(), "filesystem:read_file");
+        assert_eq!(binding.spec.adapter, ADAPTER);
     }
 }

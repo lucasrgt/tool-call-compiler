@@ -40,6 +40,23 @@ Batching and parallel execution are table stakes. The core moat is effect-safe c
 - `sdk/node`: TypeScript builder SDK.
 - `crates/xtask`: local quality gates.
 
+## Try It
+
+```powershell
+cargo run -p tool-compiler-cli -- run examples/sequential-ref.json
+cargo run -p tool-compiler-cli -- explain examples/write-conflict.json
+cargo run -p tool-compiler-cli -- bench examples/bench-sleep.json --iterations 3
+```
+
+The CLI ships with a deterministic `local` adapter for examples:
+
+- `const`: returns `input.value`, after optional `sleep_ms`.
+- `echo`: returns the input.
+- `write`: returns the input, but its declared effects can block parallelization.
+- `fail`: returns a tool error.
+
+`explain` reports optimization output, execution layers, batchable groups, and diagnostics such as missing effects or read/write conflicts.
+
 ## Quality Gates
 
 ```powershell

@@ -36,7 +36,7 @@ test("run result type matches composite tool feedback shape", () => {
     outputs: { answer: "ok" },
     node_outputs: { step: { answer: "ok" } },
     trace: [{ node: "step", tool: "echo", status: "finished" }],
-    optimization: { deduplicated: [] },
+    optimization: { deduplicated: [], batch_groups: [] },
   };
 
   assert.equal(result.outputs.answer, "ok");

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::task::JoinError;
-use tool_compiler_graph::GraphError;
+use tool_compiler_graph::{GraphError, validate};
 use tool_compiler_ir::{Node, NodeId, Plan, REF_KEY, ValueRef};
 use tool_compiler_optimizer::{OptimizationReport, OptimizedPlan, optimize};
 
@@ -15,16 +15,50 @@ pub trait ToolExecutor: Send + Sync {
     async fn call(&self, tool: &str, input: Value) -> Result<Value, ToolExecutionError>;
 }
 
+#[derive(Clone, Default)]
+pub struct ToolRegistry {
+    adapters: BTreeMap<String, Arc<dyn ToolExecutor>>,
+}
+
+impl ToolRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_adapter(
+        mut self,
+        adapter: impl Into<String>,
+        executor: impl ToolExecutor + 'static,
+    ) -> Self {
+        self.register_adapter(adapter, executor);
+        self
+    }
+
+    pub fn register_adapter(
+        &mut self,
+        adapter: impl Into<String>,
+        executor: impl ToolExecutor + 'static,
+    ) {
+        self.adapters.insert(adapter.into(), Arc::new(executor));
+    }
+
+    fn executor(&self, adapter: &str) -> Option<Arc<dyn ToolExecutor>> {
+        self.adapters.get(adapter).cloned()
+    }
+}
+
 #[derive(Clone)]
 pub struct Runtime {
-    executor: Arc<dyn ToolExecutor>,
+    registry: ToolRegistry,
 }
 
 impl Runtime {
     pub fn new(executor: impl ToolExecutor + 'static) -> Self {
-        Self {
-            executor: Arc::new(executor),
-        }
+        Self::from_registry(ToolRegistry::new().with_adapter("test", executor))
+    }
+
+    pub fn from_registry(registry: ToolRegistry) -> Self {
+        Self { registry }
     }
 
     pub async fn run(&self, plan: Plan) -> Result<RunResult, RuntimeError> {
@@ -32,12 +66,37 @@ impl Runtime {
         self.run_optimized(optimized).await
     }
 
+    pub async fn run_serial(&self, plan: Plan) -> Result<RunResult, RuntimeError> {
+        let graph = validate(&plan)?;
+        let layers = graph
+            .layers()
+            .iter()
+            .flat_map(|layer| layer.iter().map(|node| vec![node.clone()]))
+            .collect();
+        self.run_layers(plan, layers, OptimizationReport::default())
+            .await
+    }
+
     async fn run_optimized(&self, optimized: OptimizedPlan) -> Result<RunResult, RuntimeError> {
-        let nodes_by_id = index_nodes(optimized.plan());
+        self.run_layers(
+            optimized.plan().clone(),
+            optimized.graph().layers().to_vec(),
+            optimized.report().clone(),
+        )
+        .await
+    }
+
+    async fn run_layers(
+        &self,
+        plan: Plan,
+        layers: Vec<Vec<NodeId>>,
+        optimization: OptimizationReport,
+    ) -> Result<RunResult, RuntimeError> {
+        let nodes_by_id = index_nodes(&plan);
         let mut node_outputs = BTreeMap::<NodeId, Value>::new();
         let mut trace = Vec::new();
 
-        for layer in optimized.graph().layers() {
+        for layer in &layers {
             let mut tasks = tokio::task::JoinSet::new();
 
             for node_id in layer {
@@ -46,7 +105,16 @@ impl Runtime {
                     .expect("validated graph node should exist")
                     .clone();
                 let input = resolve_input(&node.input, &node_outputs)?;
-                let executor = Arc::clone(&self.executor);
+                let adapter = plan
+                    .tools
+                    .get(&node.tool)
+                    .expect("validated tool should exist")
+                    .adapter
+                    .clone();
+                let executor = self
+                    .registry
+                    .executor(&adapter)
+                    .ok_or_else(|| RuntimeError::MissingAdapter { adapter })?;
 
                 tasks.spawn(async move {
                     let started = TraceEvent::started(&node);
@@ -76,7 +144,7 @@ impl Runtime {
         }
 
         let mut outputs = BTreeMap::new();
-        for (name, value_ref) in &optimized.plan().outputs {
+        for (name, value_ref) in &plan.outputs {
             outputs.insert(name.clone(), resolve_value_ref(value_ref, &node_outputs)?);
         }
 
@@ -84,7 +152,7 @@ impl Runtime {
             outputs,
             node_outputs,
             trace,
-            optimization: optimized.report().clone(),
+            optimization,
         })
     }
 }
@@ -163,6 +231,8 @@ pub enum RuntimeError {
     },
     #[error("join error: {0}")]
     Join(JoinError),
+    #[error("no executor registered for adapter '{adapter}'")]
+    MissingAdapter { adapter: String },
     #[error("node '{0}' has no output yet")]
     MissingNodeOutput(NodeId),
     #[error("reference '{reference}' missing path segment '{segment}'")]
@@ -323,6 +393,56 @@ mod tests {
         );
         assert_eq!(result.node_outputs.len(), 1);
         assert_eq!(result.optimization.deduplicated.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn serial_baseline_does_not_deduplicate() {
+        let mut plan = plan();
+        plan.nodes
+            .push(Node::new("a", "const_user").with_input(json!({ "id": "u_1" })));
+        plan.nodes
+            .push(Node::new("b", "const_user").with_input(json!({ "id": "u_1" })));
+        plan.outputs.insert("user".into(), ValueRef::output("b"));
+
+        let result = Runtime::new(TestExecutor).run_serial(plan).await.unwrap();
+
+        assert_eq!(result.node_outputs.len(), 2);
+        assert!(result.optimization.deduplicated.is_empty());
+    }
+
+    #[tokio::test]
+    async fn registry_routes_by_adapter() {
+        let mut plan = plan();
+        plan.tools.insert(
+            "echo".into(),
+            ToolSpec::new("custom").with_effects(Effects::pure()),
+        );
+        plan.nodes
+            .push(Node::new("message", "echo").with_input(json!({ "ok": true })));
+        plan.outputs
+            .insert("message".into(), ValueRef::output("message"));
+        let registry = ToolRegistry::new().with_adapter("custom", TestExecutor);
+
+        let result = Runtime::from_registry(registry).run(plan).await.unwrap();
+
+        assert_eq!(result.outputs["message"], json!({ "ok": true }));
+    }
+
+    #[tokio::test]
+    async fn reports_missing_adapter() {
+        let mut plan = plan();
+        plan.tools.insert(
+            "echo".into(),
+            ToolSpec::new("missing").with_effects(Effects::pure()),
+        );
+        plan.nodes.push(Node::new("message", "echo"));
+
+        let error = Runtime::from_registry(ToolRegistry::new())
+            .run(plan)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RuntimeError::MissingAdapter { .. }));
     }
 
     #[tokio::test]
