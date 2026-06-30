@@ -46,6 +46,8 @@ pub struct ToolSpec {
     pub adapter: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effects: Option<Effects>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ToolLimits>,
 }
 
 impl ToolSpec {
@@ -53,6 +55,7 @@ impl ToolSpec {
         Self {
             adapter: adapter.into(),
             effects: None,
+            limits: None,
         }
     }
 
@@ -60,6 +63,19 @@ impl ToolSpec {
         self.effects = Some(effects);
         self
     }
+
+    pub fn with_limits(mut self, limits: ToolLimits) -> Self {
+        self.limits = Some(limits);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_size: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,5 +311,17 @@ mod tests {
         let value = serde_json::to_value(ValueRef::new("a", ["b"])).unwrap();
 
         assert_eq!(value, json!("a.output.b"));
+    }
+
+    #[test]
+    fn serializes_tool_limits_when_present() {
+        let spec = ToolSpec::new("test").with_limits(ToolLimits {
+            max_concurrency: Some(2),
+            batch_size: Some(10),
+        });
+        let value = serde_json::to_value(spec).unwrap();
+
+        assert_eq!(value["limits"]["max_concurrency"], 2);
+        assert_eq!(value["limits"]["batch_size"], 10);
     }
 }

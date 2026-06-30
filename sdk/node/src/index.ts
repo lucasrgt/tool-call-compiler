@@ -31,6 +31,12 @@ export interface Effects {
 export interface ToolSpec {
   adapter: string;
   effects?: Effects;
+  limits?: ToolLimits;
+}
+
+export interface ToolLimits {
+  max_concurrency?: number;
+  batch_size?: number;
 }
 
 export interface NodeSpec {
@@ -81,6 +87,7 @@ export interface TraceEvent {
   node: string;
   tool: string;
   status: TraceStatus;
+  duration_ms?: number;
 }
 
 export interface RunResult {
@@ -182,6 +189,86 @@ export function write(adapter: string, writes: string[]): ToolSpec {
   };
 }
 
+export function limits(spec: ToolSpec, value: ToolLimits): ToolSpec {
+  return {
+    ...spec,
+    limits: value,
+  };
+}
+
+export const PLAN_SCHEMA = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: "https://tool-call-compiler.dev/schemas/plan.schema.json",
+  title: "Tool Call Compiler Plan",
+  type: "object",
+  required: ["version", "tools", "nodes", "outputs"],
+  additionalProperties: false,
+  properties: {
+    version: { const: "0" },
+    tools: {
+      type: "object",
+      additionalProperties: { $ref: "#/$defs/toolSpec" },
+    },
+    nodes: { type: "array", items: { $ref: "#/$defs/node" } },
+    outputs: { type: "object", additionalProperties: { type: "string" } },
+  },
+  $defs: {
+    toolSpec: {
+      type: "object",
+      required: ["adapter"],
+      additionalProperties: false,
+      properties: {
+        adapter: { type: "string", minLength: 1 },
+        effects: { $ref: "#/$defs/effects" },
+        limits: { $ref: "#/$defs/limits" },
+      },
+    },
+    effects: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        pure: { type: "boolean" },
+        reads: { type: "array", items: { type: "string" } },
+        writes: { type: "array", items: { type: "string" } },
+        idempotent: { type: "boolean" },
+        cacheable: { type: "boolean" },
+        batchable: { type: "boolean" },
+        commutative: { type: "boolean" },
+        timeout_ms: { type: "integer", minimum: 1 },
+        retry: { $ref: "#/$defs/retry" },
+      },
+    },
+    limits: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        max_concurrency: { type: "integer", minimum: 1 },
+        batch_size: { type: "integer", minimum: 1 },
+      },
+    },
+    retry: {
+      type: "object",
+      required: ["max_attempts"],
+      additionalProperties: false,
+      properties: {
+        max_attempts: { type: "integer", minimum: 1, maximum: 255 },
+        retryable_errors: { type: "array", items: { type: "string" } },
+      },
+    },
+    node: {
+      type: "object",
+      required: ["id", "tool"],
+      additionalProperties: false,
+      properties: {
+        id: { type: "string", minLength: 1 },
+        tool: { type: "string", minLength: 1 },
+        input: true,
+        depends_on: { type: "array", items: { type: "string" } },
+      },
+    },
+  },
+} as const;
+
 export const tc = {
   plan,
   ref,
@@ -191,4 +278,6 @@ export const tc = {
     readOnly,
     write,
   },
+  limits,
+  PLAN_SCHEMA,
 };

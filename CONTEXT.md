@@ -47,3 +47,15 @@ Avoid: using "batch group" for arbitrary manual MCP aggregation.
 A small adapter verification flow that proves the common runtime contract: echo round-trip, batch dispatch shape, and tool error propagation.
 
 Avoid: treating conformance as full integration coverage for a downstream service.
+
+## Tool Limit
+
+A scheduler constraint attached to a tool spec, such as batch size or maximum concurrency. Limits constrain how much execution may happen at once; effects decide whether the execution is legal at all.
+
+Avoid: using limits to describe side-effect safety.
+
+## Tool Cache
+
+The runtime cache boundary used for pure or cacheable tool outputs. It is an adapter-independent contract, with memory as the default backend and external stores as replaceable implementations.
+
+Avoid: treating cache as an optimizer pass.

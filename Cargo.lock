@@ -313,10 +313,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-compiler-adapter-fs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tool-compiler-ir",
+ "tool-compiler-runtime",
+]
+
+[[package]]
 name = "tool-compiler-adapter-http"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "serde_json",
+ "thiserror",
+ "tokio",
  "tool-compiler-ir",
+ "tool-compiler-runtime",
 ]
 
 [[package]]
@@ -333,6 +350,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-compiler-adapter-shell"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tool-compiler-ir",
+ "tool-compiler-runtime",
+]
+
+[[package]]
 name = "tool-compiler-cli"
 version = "0.1.0"
 dependencies = [
@@ -341,7 +370,9 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tool-compiler-adapter-fs",
  "tool-compiler-adapter-mcp",
+ "tool-compiler-adapter-shell",
  "tool-compiler-graph",
  "tool-compiler-ir",
  "tool-compiler-optimizer",

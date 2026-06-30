@@ -1,0 +1,24 @@
+{
+  "fs": [
+    {
+      "adapter": "fs.repo",
+      "root": "."
+    }
+  ],
+  "shell": [
+    {
+      "adapter": "shell.local",
+      "cwd": ".",
+      "env": {}
+    }
+  ],
+  "mcp": [
+    {
+      "adapter": "mcp.filesystem",
+      "name": "filesystem",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "env": {}
+    }
+  ]
+}

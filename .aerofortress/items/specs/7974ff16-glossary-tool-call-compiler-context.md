@@ -3,14 +3,14 @@ id: 7974ff16-05a7-41eb-b19a-353e509d55c7
 slug: specs
 type: doc
 title: Glossary — tool-call-compiler CONTEXT
-tags: glossary, context, domain-language
+tags: tool-call-compiler, glossary
 provenance: observado
 evidence: C:\Users\lucas\dev\tool-call-compiler\CONTEXT.md
-decay: seasonal
+decay: stable
 created: 2026-06-30T18:03:43.344510900+00:00
-updated: 2026-06-30T18:56:27.422634500+00:00
-validated: 2026-06-30T18:56:27.422634500+00:00
+updated: 2026-06-30T19:17:20.627900300+00:00
+validated: 2026-06-30T19:17:20.627900300+00:00
 links: 
 ---
 
-Glossário público do projeto: define Tool Call, Plan, Compiled Tool Graph, Effect, Adapter, Runtime, Batch Group e Conformance Suite para manter a linguagem do domínio precisa. O ponto central é evitar tratar tool como apenas MCP, separar planner/runtime/adapter, e deixar claro que batch group é seleção segura do compilador via efeitos, não agregação MCP manual arbitrária.
+Glossário canônico do domínio tool-call-compiler. Define Tool Call Compiler, Tool Plan, Tool Graph, Compiled Tool Call, Tool Adapter, Tool Effect, Tool Limit, Tool Cache, Composite Tool Feedback, Tool Call Boundary e reforça termos evitados como MCP-only compiler/automation macro/browser clicker.

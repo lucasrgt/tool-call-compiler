@@ -67,6 +67,11 @@ Every tool capability should declare:
 - `timeout`: default execution deadline.
 - `retry_policy`: retryable errors and attempt limits.
 
+Scheduler limits are separate from effects:
+
+- `batch_size`: maximum nodes joined into one adapter batch call.
+- `max_concurrency`: conservative ceiling for concurrent execution in a graph layer.
+
 The optimizer must refuse transformations when effects are missing or ambiguous.
 
 ## Quality Gates
@@ -84,9 +89,12 @@ The optimizer must refuse transformations when effects are missing or ambiguous.
 - `bench` compares serial baseline vs compiled execution and clears runtime cache between iterations.
 - Optimizer reports deduplicated nodes and batchable groups.
 - Runtime executes optimizer-selected `batch_groups` through the `call_batch` adapter contract.
-- Runtime caches `pure`/`cacheable` tool outputs and reports cache hits in traces.
+- Runtime caches `pure`/`cacheable` tool outputs through a pluggable `ToolCache` trait and reports cache hits in traces.
+- Trace finish/error/cache events include `duration_ms`.
 - Runtime exports an adapter conformance suite covering echo round-trip, batch contract, and tool error propagation.
 - Explain diagnostics report why safe parallelization was blocked.
-- MCP adapter includes typed config, MCP executor, and stdio JSON-RPC client for `initialize` + `tools/call`.
-- CLI can load MCP stdio adapters from config and can expose the compiler itself as one MCP stdio tool.
+- MCP adapter includes typed config, MCP executor, and persistent stdio JSON-RPC sessions for `initialize` + `tools/call`.
+- Filesystem and shell adapters are runnable from CLI runtime config; HTTP adapter has an injectable client executor.
+- CLI can load runtime adapters from config and can expose the compiler itself as one MCP stdio tool.
 - Examples include a live MCP filesystem benchmark config.
+- Public plan JSON Schema lives in `schemas/plan.schema.json` and is mirrored by the TypeScript SDK.

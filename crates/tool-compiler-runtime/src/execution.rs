@@ -1,24 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::Value;
-use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 use tool_compiler_graph::validate;
-use tool_compiler_ir::{Effects, Node, NodeId, Plan};
+use tool_compiler_ir::{Effects, Node, NodeId, Plan, ToolLimits};
 use tool_compiler_optimizer::{BatchGroup, OptimizationReport, OptimizedPlan, optimize};
 
 use crate::refs::{resolve_input, resolve_value_ref};
-use crate::{
-    BatchInput, RunResult, Runtime, RuntimeError, ToolExecutor, ToolRegistry, TraceEvent,
-    TraceStatus,
-};
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct CacheKey {
-    adapter: String,
-    tool: String,
-    input: String,
-}
+use crate::{BatchInput, CacheKey, MemoryCache, RunResult, Runtime, RuntimeError, ToolCache};
+use crate::{ToolExecutor, ToolRegistry, TraceEvent, TraceStatus};
 
 #[derive(Clone, Debug)]
 struct PreparedCall {
@@ -32,6 +24,7 @@ struct NodeExecution {
     node: Node,
     started: Option<TraceEvent>,
     status: TraceStatus,
+    duration_ms: u128,
     result: Result<Value, crate::ToolExecutionError>,
 }
 
@@ -41,9 +34,13 @@ impl Runtime {
     }
 
     pub fn from_registry(registry: ToolRegistry) -> Self {
+        Self::with_cache(registry, MemoryCache::default())
+    }
+
+    pub fn with_cache(registry: ToolRegistry, cache: impl ToolCache + 'static) -> Self {
         Self {
             registry,
-            cache: Arc::default(),
+            cache: Arc::new(cache),
         }
     }
 
@@ -64,7 +61,7 @@ impl Runtime {
     }
 
     pub async fn clear_cache(&self) {
-        self.cache.lock().await.clear();
+        self.cache.clear().await;
     }
 
     async fn run_optimized(&self, optimized: OptimizedPlan) -> Result<RunResult, RuntimeError> {
@@ -89,8 +86,13 @@ impl Runtime {
         for layer in &layers {
             let mut tasks = tokio::task::JoinSet::new();
             let mut claimed = BTreeSet::new();
+            let permits = Arc::new(Semaphore::new(
+                layer_max_concurrency(&plan, layer)
+                    .unwrap_or(layer.len())
+                    .max(1),
+            ));
 
-            for group in layer_batch_groups(&optimization, layer) {
+            for group in layer_batch_groups(&plan, &optimization, layer) {
                 let adapter = group.adapter.clone();
                 let executor = self.registry.executor(&adapter).ok_or_else(|| {
                     RuntimeError::MissingAdapter {
@@ -100,7 +102,11 @@ impl Runtime {
                 let calls = prepare_calls(&plan, &nodes_by_id, &node_outputs, &group.nodes)?;
                 claimed.extend(group.nodes.iter().cloned());
                 let cache = self.cache.clone();
-                tasks.spawn(async move { execute_batch(cache, group.tool, executor, calls).await });
+                let permits = permits.clone();
+                tasks.spawn(async move {
+                    let _permit = permits.acquire_owned().await.expect("semaphore is open");
+                    execute_batch(cache, group.tool, executor, calls).await
+                });
             }
 
             for node_id in layer.iter().filter(|node_id| !claimed.contains(*node_id)) {
@@ -126,8 +132,12 @@ impl Runtime {
                     input,
                 };
                 let cache = self.cache.clone();
+                let permits = permits.clone();
 
-                tasks.spawn(async move { execute_single(cache, executor, call).await });
+                tasks.spawn(async move {
+                    let _permit = permits.acquire_owned().await.expect("semaphore is open");
+                    execute_single(cache, executor, call).await
+                });
             }
 
             while let Some(task) = tasks.join_next().await {
@@ -154,7 +164,7 @@ impl Runtime {
 }
 
 async fn execute_single(
-    cache: Arc<Mutex<BTreeMap<CacheKey, Value>>>,
+    cache: Arc<dyn ToolCache>,
     executor: Arc<dyn ToolExecutor>,
     call: PreparedCall,
 ) -> Result<Vec<NodeExecution>, RuntimeError> {
@@ -162,7 +172,7 @@ async fn execute_single(
 }
 
 async fn execute_batch(
-    cache: Arc<Mutex<BTreeMap<CacheKey, Value>>>,
+    cache: Arc<dyn ToolCache>,
     tool: String,
     executor: Arc<dyn ToolExecutor>,
     calls: Vec<PreparedCall>,
@@ -180,13 +190,25 @@ async fn execute_batch(
         })
         .collect();
 
+    let started = Instant::now();
     match executor.call_batch(&tool, batch_inputs).await {
-        Ok(outputs) => push_batch_outputs(&cache, &mut events, pending, outputs).await?,
+        Ok(outputs) => {
+            push_batch_outputs(
+                &cache,
+                &mut events,
+                pending,
+                outputs,
+                started.elapsed().as_millis(),
+            )
+            .await?
+        }
         Err(error) => {
+            let duration_ms = started.elapsed().as_millis();
             events.extend(pending.into_iter().map(|call| NodeExecution {
                 started: Some(TraceEvent::started(&call.node)),
                 node: call.node,
                 status: TraceStatus::Finished,
+                duration_ms,
                 result: Err(error.clone()),
             }));
         }
@@ -196,7 +218,7 @@ async fn execute_batch(
 }
 
 async fn split_cached_calls(
-    cache: &Arc<Mutex<BTreeMap<CacheKey, Value>>>,
+    cache: &Arc<dyn ToolCache>,
     calls: Vec<PreparedCall>,
 ) -> (Vec<NodeExecution>, Vec<PreparedCall>) {
     let mut cached = Vec::new();
@@ -214,10 +236,11 @@ async fn split_cached_calls(
 }
 
 async fn push_batch_outputs(
-    cache: &Arc<Mutex<BTreeMap<CacheKey, Value>>>,
+    cache: &Arc<dyn ToolCache>,
     events: &mut Vec<NodeExecution>,
     pending: Vec<PreparedCall>,
     outputs: Vec<crate::BatchOutput>,
+    duration_ms: u128,
 ) -> Result<(), RuntimeError> {
     let mut by_node = outputs
         .into_iter()
@@ -236,6 +259,7 @@ async fn push_batch_outputs(
             started: Some(TraceEvent::started(&call.node)),
             node: call.node,
             status: TraceStatus::Finished,
+            duration_ms,
             result: Ok(output),
         });
     }
@@ -244,7 +268,7 @@ async fn push_batch_outputs(
 }
 
 async fn execute_prepared_call(
-    cache: Arc<Mutex<BTreeMap<CacheKey, Value>>>,
+    cache: Arc<dyn ToolCache>,
     executor: Arc<dyn ToolExecutor>,
     call: PreparedCall,
 ) -> NodeExecution {
@@ -252,7 +276,9 @@ async fn execute_prepared_call(
         return cache_hit(call.node, output);
     }
 
+    let started = Instant::now();
     let result = executor.call(&call.node.tool, call.input).await;
+    let duration_ms = started.elapsed().as_millis();
     if let Ok(output) = &result {
         insert_cache(&cache, &call.cache_key, output).await;
     }
@@ -261,6 +287,7 @@ async fn execute_prepared_call(
         started: Some(TraceEvent::started(&call.node)),
         node: call.node,
         status: TraceStatus::Finished,
+        duration_ms,
         result,
     }
 }
@@ -277,11 +304,15 @@ fn record_events(
 
         match event.result {
             Ok(output) => {
-                trace.push(TraceEvent::finished_with_status(&event.node, event.status));
+                trace.push(TraceEvent::finished_with_status(
+                    &event.node,
+                    event.status,
+                    event.duration_ms,
+                ));
                 node_outputs.insert(event.node.id, output);
             }
             Err(error) => {
-                trace.push(TraceEvent::failed(&event.node, &error));
+                trace.push(TraceEvent::failed(&event.node, &error, event.duration_ms));
                 return Err(RuntimeError::Tool {
                     node: event.node.id,
                     error,
@@ -292,21 +323,14 @@ fn record_events(
     Ok(())
 }
 
-async fn cached_output(
-    cache: &Arc<Mutex<BTreeMap<CacheKey, Value>>>,
-    key: &Option<CacheKey>,
-) -> Option<Value> {
+async fn cached_output(cache: &Arc<dyn ToolCache>, key: &Option<CacheKey>) -> Option<Value> {
     let key = key.as_ref()?;
-    cache.lock().await.get(key).cloned()
+    cache.get(key).await
 }
 
-async fn insert_cache(
-    cache: &Arc<Mutex<BTreeMap<CacheKey, Value>>>,
-    key: &Option<CacheKey>,
-    output: &Value,
-) {
+async fn insert_cache(cache: &Arc<dyn ToolCache>, key: &Option<CacheKey>, output: &Value) {
     if let Some(key) = key {
-        cache.lock().await.insert(key.clone(), output.clone());
+        cache.insert(key.clone(), output.clone()).await;
     }
 }
 
@@ -315,6 +339,7 @@ fn cache_hit(node: Node, output: Value) -> NodeExecution {
         node,
         started: None,
         status: TraceStatus::CacheHit,
+        duration_ms: 0,
         result: Ok(output),
     }
 }
@@ -348,14 +373,52 @@ fn prepare_calls(
         .collect()
 }
 
-fn layer_batch_groups(report: &OptimizationReport, layer: &[NodeId]) -> Vec<BatchGroup> {
+fn layer_batch_groups(
+    plan: &Plan,
+    report: &OptimizationReport,
+    layer: &[NodeId],
+) -> Vec<BatchGroup> {
     let layer = layer.iter().collect::<BTreeSet<_>>();
     report
         .batch_groups
         .iter()
         .filter(|group| group.nodes.iter().all(|node| layer.contains(node)))
-        .cloned()
+        .flat_map(|group| split_batch_group(group.clone(), tool_limits(plan, &group.tool)))
         .collect()
+}
+
+fn split_batch_group(group: BatchGroup, limits: Option<&ToolLimits>) -> Vec<BatchGroup> {
+    let batch_size = limits
+        .and_then(|limits| limits.batch_size)
+        .unwrap_or(group.nodes.len());
+    let batch_size = batch_size.max(1);
+    group
+        .nodes
+        .chunks(batch_size)
+        .map(|nodes| BatchGroup {
+            adapter: group.adapter.clone(),
+            tool: group.tool.clone(),
+            nodes: nodes.to_vec(),
+        })
+        .filter(|group| group.nodes.len() > 1)
+        .collect()
+}
+
+fn tool_limits<'a>(plan: &'a Plan, tool: &str) -> Option<&'a ToolLimits> {
+    plan.tools.get(tool).and_then(|spec| spec.limits.as_ref())
+}
+
+fn layer_max_concurrency(plan: &Plan, layer: &[NodeId]) -> Option<usize> {
+    layer
+        .iter()
+        .filter_map(|node_id| {
+            plan.nodes
+                .iter()
+                .find(|node| &node.id == node_id)
+                .and_then(|node| tool_limits(plan, &node.tool))
+                .and_then(|limits| limits.max_concurrency)
+        })
+        .min()
 }
 
 fn cache_key(plan: &Plan, node: &Node, adapter: &str, input: &Value) -> Option<CacheKey> {

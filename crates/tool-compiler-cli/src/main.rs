@@ -8,7 +8,9 @@ use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tool_compiler_adapter_fs::FsExecutor;
 use tool_compiler_adapter_mcp::{McpExecutor, McpServerConfig, McpStdioClient, McpTransport};
+use tool_compiler_adapter_shell::ShellExecutor;
 use tool_compiler_graph::validate;
 use tool_compiler_ir::Plan;
 use tool_compiler_optimizer::{explain, optimize};
@@ -37,19 +39,19 @@ enum Command {
     },
     Run {
         plan: PathBuf,
-        #[arg(long)]
-        mcp_config: Option<PathBuf>,
+        #[arg(long = "runtime-config", alias = "mcp-config")]
+        runtime_config: Option<PathBuf>,
     },
     Bench {
         plan: PathBuf,
         #[arg(short, long, default_value_t = 3)]
         iterations: u32,
-        #[arg(long)]
-        mcp_config: Option<PathBuf>,
+        #[arg(long = "runtime-config", alias = "mcp-config")]
+        runtime_config: Option<PathBuf>,
     },
     ServeMcp {
-        #[arg(long)]
-        mcp_config: Option<PathBuf>,
+        #[arg(long = "runtime-config", alias = "mcp-config")]
+        runtime_config: Option<PathBuf>,
     },
 }
 
@@ -77,21 +79,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let plan = read_plan(plan)?;
             println!("{}", serde_json::to_string_pretty(&explain(plan)?)?);
         }
-        Command::Run { plan, mcp_config } => {
+        Command::Run {
+            plan,
+            runtime_config,
+        } => {
             let plan = read_plan(plan)?;
-            let result = configured_runtime(mcp_config)?.run(plan).await?;
+            let result = configured_runtime(runtime_config)?.run(plan).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Bench {
             plan,
             iterations,
-            mcp_config,
+            runtime_config,
         } => {
             let plan = read_plan(plan)?;
-            let runtime = configured_runtime(mcp_config)?;
             let iterations = iterations.max(1);
-            let baseline_ms = bench(&runtime, &plan, iterations, false).await?;
-            let compiled_ms = bench(&runtime, &plan, iterations, true).await?;
+            let baseline = configured_runtime(runtime_config.clone())?;
+            let compiled = configured_runtime(runtime_config)?;
+            let baseline_ms = bench(&baseline, &plan, iterations, false).await?;
+            let compiled_ms = bench(&compiled, &plan, iterations, true).await?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&BenchResult {
@@ -101,8 +107,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 })?
             );
         }
-        Command::ServeMcp { mcp_config } => {
-            serve_mcp(configured_runtime(mcp_config)?).await?;
+        Command::ServeMcp { runtime_config } => {
+            serve_mcp(configured_runtime(runtime_config)?).await?;
         }
     }
 
@@ -130,6 +136,19 @@ fn configured_runtime(mcp_config: Option<PathBuf>) -> Result<Runtime, Box<dyn Er
                 },
             });
             registry.register_adapter(server.adapter, McpExecutor::new(client));
+        }
+        for fs in config.fs {
+            registry.register_adapter(fs.adapter, FsExecutor::new(fs.root));
+        }
+        for shell in config.shell {
+            let mut executor = ShellExecutor::new();
+            if let Some(cwd) = shell.cwd {
+                executor = executor.with_cwd(cwd);
+            }
+            for (key, value) in shell.env {
+                executor = executor.with_env(key, value);
+            }
+            registry.register_adapter(shell.adapter, executor);
         }
     }
 
@@ -165,6 +184,10 @@ struct BenchResult {
 struct RuntimeConfig {
     #[serde(default)]
     mcp: Vec<McpBinding>,
+    #[serde(default)]
+    fs: Vec<FsBinding>,
+    #[serde(default)]
+    shell: Vec<ShellBinding>,
 }
 
 #[derive(Deserialize)]
@@ -174,6 +197,21 @@ struct McpBinding {
     command: String,
     #[serde(default)]
     args: Vec<String>,
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct FsBinding {
+    adapter: String,
+    root: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct ShellBinding {
+    adapter: String,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
     #[serde(default)]
     env: std::collections::BTreeMap<String, String>,
 }

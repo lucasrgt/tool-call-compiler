@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   plan,
+  PLAN_SCHEMA,
   pure,
   readOnly,
   ref,
@@ -40,11 +41,21 @@ test("tc namespace exposes the same builder helpers", () => {
   assert.equal(built.outputs.item, "item.output");
 });
 
+test("tool limits can be layered onto specs", () => {
+  const built = plan()
+    .tool("fetch", tc.limits(pure("http"), { batch_size: 10, max_concurrency: 2 }))
+    .node("a", "fetch")
+    .toJSON();
+
+  assert.equal(built.tools.fetch.limits?.batch_size, 10);
+  assert.equal(PLAN_SCHEMA.properties.version.const, "0");
+});
+
 test("run result type matches composite tool feedback shape", () => {
   const result: RunResult = {
     outputs: { answer: "ok" },
     node_outputs: { step: { answer: "ok" } },
-    trace: [{ node: "step", tool: "echo", status: "cache_hit" }],
+    trace: [{ node: "step", tool: "echo", status: "cache_hit", duration_ms: 0 }],
     optimization: { deduplicated: [], batch_groups: [] },
   };
 

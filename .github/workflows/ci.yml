@@ -20,5 +20,7 @@ jobs:
       - run: cargo run -p xtask -- check
       - run: npm test
       - run: cargo run -p tool-compiler-cli -- run examples/sequential-ref.json
+      - run: cargo run -p tool-compiler-cli -- run examples/fs-read.json --runtime-config examples/runtime.config.example.json
+      - run: cargo run -p tool-compiler-cli -- run examples/shell-rustc.json --runtime-config examples/runtime.config.example.json
       - run: cargo run -p tool-compiler-cli -- explain examples/write-conflict.json
       - run: cargo run -p tool-compiler-cli -- bench examples/bench-sleep.json --iterations 1

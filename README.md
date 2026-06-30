@@ -38,6 +38,7 @@ Batching and parallel execution are table stakes. The core moat is effect-safe c
 - `crates/tool-compiler-runtime`: async execution over validated plans.
 - `crates/tool-compiler-adapter-*`: adapter packages.
 - `sdk/node`: TypeScript builder SDK.
+- `schemas/plan.schema.json`: public JSON Schema for plan validation.
 - `crates/xtask`: local quality gates.
 
 ## Try It
@@ -47,6 +48,8 @@ cargo run -p tool-compiler-cli -- run examples/sequential-ref.json
 cargo run -p tool-compiler-cli -- explain examples/write-conflict.json
 cargo run -p tool-compiler-cli -- bench examples/bench-sleep.json --iterations 3
 cargo run -p tool-compiler-cli -- serve-mcp
+cargo run -p tool-compiler-cli -- run examples/fs-read.json --runtime-config examples/runtime.config.example.json
+cargo run -p tool-compiler-cli -- run examples/shell-rustc.json --runtime-config examples/runtime.config.example.json
 ```
 
 The CLI ships with a deterministic `local` adapter for examples:
@@ -61,7 +64,7 @@ The CLI ships with a deterministic `local` adapter for examples:
 For a live MCP filesystem smoke benchmark:
 
 ```powershell
-cargo run -p tool-compiler-cli -- bench examples/mcp-filesystem-bench.json --mcp-config examples/mcp-filesystem.config.example.json --iterations 1
+cargo run -p tool-compiler-cli -- bench examples/mcp-filesystem-bench.json --runtime-config examples/runtime.config.example.json --iterations 1
 ```
 
 The MCP config launches `@modelcontextprotocol/server-filesystem` over stdio and
@@ -88,8 +91,21 @@ Runtime adapters implement:
 The runtime also keeps an in-memory cache for `pure`/`cacheable` tools and reports
 cache hits in the trace as `cache_hit`.
 
+Cache is pluggable through the `ToolCache` trait; `MemoryCache` is the default.
+Scheduler limits live on `ToolSpec.limits` and currently enforce `batch_size`
+and a conservative layer-level `max_concurrency` ceiling.
+
+Trace finish/error/cache events include `duration_ms`.
+
 `tool-compiler-runtime` exports `check_adapter_conformance(...)` for adapter smoke
 tests: echo round-trip, batch contract, and tool error propagation.
+
+Built-in adapters:
+
+- `tool-compiler-adapter-mcp`: persistent stdio MCP sessions.
+- `tool-compiler-adapter-fs`: root-contained filesystem reads/writes/listing.
+- `tool-compiler-adapter-shell`: direct process execution via `program` + `args`.
+- `tool-compiler-adapter-http`: generic executor over an injected HTTP client.
 
 ## Quality Gates
 

@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tool_compiler_ir::{Effects, ToolSpec};
 use tool_compiler_runtime::{BatchInput, BatchOutput, ToolExecutionError, ToolExecutor};
 
@@ -134,6 +135,14 @@ where
 pub struct McpStdioClient {
     config: McpServerConfig,
     next_id: std::sync::Arc<AtomicU64>,
+    session: std::sync::Arc<Mutex<Option<McpStdioSession>>>,
+}
+
+#[derive(Debug)]
+struct McpStdioSession {
+    _child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
 }
 
 impl McpStdioClient {
@@ -141,6 +150,7 @@ impl McpStdioClient {
         Self {
             config,
             next_id: Default::default(),
+            session: Default::default(),
         }
     }
 }
@@ -164,30 +174,18 @@ impl McpClient for McpStdioClient {
         &self,
         calls: Vec<McpToolCall>,
     ) -> Result<Vec<McpToolResult>, McpClientError> {
-        let McpTransport::Stdio { command, args, env } = &self.config.transport;
-        let mut child = spawn_stdio(command, args, env)?;
-
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| McpClientError::Transport("missing child stdin".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| McpClientError::Transport("missing child stdout".into()))?;
-        let mut lines = BufReader::new(stdout).lines();
-
-        let init_id = self.next_id();
-        write_json(&mut stdin, initialize_request(init_id)).await?;
-        expect_response(&mut lines, init_id).await?;
-        write_json(&mut stdin, initialized_notification()).await?;
+        let mut guard = self.session.lock().await;
+        if guard.is_none() {
+            *guard = Some(start_session(&self.config, self.next_id()).await?);
+        }
+        let session = guard.as_mut().expect("session initialized above");
 
         let mut pending = BTreeMap::new();
         for call in &calls {
             let id = self.next_id();
             pending.insert(id, call.node.clone());
             write_json(
-                &mut stdin,
+                &mut session.stdin,
                 tool_call_request(id, &call.name, call.arguments.clone()),
             )
             .await?;
@@ -195,16 +193,41 @@ impl McpClient for McpStdioClient {
 
         let mut results = Vec::with_capacity(pending.len());
         while !pending.is_empty() {
-            let (id, result) = read_response(&mut lines).await?;
+            let (id, result) = read_response(&mut session.lines).await?;
             if let Some(node) = pending.remove(&id) {
                 results.push(McpToolResult { node, result });
             }
         }
 
-        drop(stdin);
-        let _ = child.wait().await;
         Ok(results)
     }
+}
+
+async fn start_session(
+    config: &McpServerConfig,
+    init_id: u64,
+) -> Result<McpStdioSession, McpClientError> {
+    let McpTransport::Stdio { command, args, env } = &config.transport;
+    let mut child = spawn_stdio(command, args, env)?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| McpClientError::Transport("missing child stdin".into()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| McpClientError::Transport("missing child stdout".into()))?;
+    let mut lines = BufReader::new(stdout).lines();
+
+    write_json(&mut stdin, initialize_request(init_id)).await?;
+    expect_response(&mut lines, init_id).await?;
+    write_json(&mut stdin, initialized_notification()).await?;
+
+    Ok(McpStdioSession {
+        _child: child,
+        stdin,
+        lines,
+    })
 }
 
 fn spawn_stdio(
@@ -221,6 +244,7 @@ fn spawn_stdio(
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .spawn()
         {
             Ok(child) => return Ok(child),
@@ -558,6 +582,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stdio_client_reuses_session_between_calls() {
+        let client = McpStdioClient::new(McpServerConfig {
+            name: "fake".into(),
+            transport: McpTransport::Stdio {
+                command: "node".into(),
+                args: vec!["-e".into(), fake_mcp_server_script().into()],
+                env: BTreeMap::new(),
+            },
+        });
+
+        let first = client
+            .call_tool("echo", json!({ "id": "first" }))
+            .await
+            .unwrap();
+        let second = client
+            .call_tool("echo", json!({ "id": "second" }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            first["structuredContent"]["pid"],
+            second["structuredContent"]["pid"]
+        );
+    }
+
+    #[tokio::test]
     async fn stdio_client_maps_server_errors() {
         let client = McpStdioClient::new(McpServerConfig {
             name: "fake".into(),
@@ -594,7 +644,7 @@ rl.on('line', line => {
       jsonrpc: '2.0',
       id: req.id,
       result: {
-        structuredContent: { name: req.params.name, arguments: req.params.arguments },
+        structuredContent: { name: req.params.name, arguments: req.params.arguments, pid: process.pid },
         content: [{ type: 'text', text: 'ok' }],
         isError: false
       }

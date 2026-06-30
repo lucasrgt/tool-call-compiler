@@ -52,6 +52,40 @@ pub struct BatchOutput {
     pub output: Value,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CacheKey {
+    pub adapter: String,
+    pub tool: String,
+    pub input: String,
+}
+
+#[async_trait]
+pub trait ToolCache: Send + Sync {
+    async fn get(&self, key: &CacheKey) -> Option<Value>;
+    async fn insert(&self, key: CacheKey, output: Value);
+    async fn clear(&self);
+}
+
+#[derive(Clone, Default)]
+pub struct MemoryCache {
+    inner: Arc<Mutex<BTreeMap<CacheKey, Value>>>,
+}
+
+#[async_trait]
+impl ToolCache for MemoryCache {
+    async fn get(&self, key: &CacheKey) -> Option<Value> {
+        self.inner.lock().await.get(key).cloned()
+    }
+
+    async fn insert(&self, key: CacheKey, output: Value) {
+        self.inner.lock().await.insert(key, output);
+    }
+
+    async fn clear(&self) {
+        self.inner.lock().await.clear();
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
     adapters: BTreeMap<String, Arc<dyn ToolExecutor>>,
@@ -87,7 +121,7 @@ impl ToolRegistry {
 #[derive(Clone)]
 pub struct Runtime {
     registry: ToolRegistry,
-    cache: Arc<Mutex<BTreeMap<execution::CacheKey, Value>>>,
+    cache: Arc<dyn ToolCache>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -103,6 +137,8 @@ pub struct TraceEvent {
     pub node: NodeId,
     pub tool: String,
     pub status: TraceStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u128>,
 }
 
 impl TraceEvent {
@@ -111,22 +147,25 @@ impl TraceEvent {
             node: node.id.clone(),
             tool: node.tool.clone(),
             status: TraceStatus::Started,
+            duration_ms: None,
         }
     }
 
-    fn finished_with_status(node: &Node, status: TraceStatus) -> Self {
+    fn finished_with_status(node: &Node, status: TraceStatus, duration_ms: u128) -> Self {
         Self {
             node: node.id.clone(),
             tool: node.tool.clone(),
             status,
+            duration_ms: Some(duration_ms),
         }
     }
 
-    fn failed(node: &Node, error: &ToolExecutionError) -> Self {
+    fn failed(node: &Node, error: &ToolExecutionError, duration_ms: u128) -> Self {
         Self {
             node: node.id.clone(),
             tool: node.tool.clone(),
             status: TraceStatus::Failed(error.message.clone()),
+            duration_ms: Some(duration_ms),
         }
     }
 }
@@ -187,7 +226,7 @@ mod tests {
 
     use async_trait::async_trait;
     use serde_json::json;
-    use tool_compiler_ir::{Effects, Node, Plan, ToolSpec};
+    use tool_compiler_ir::{Effects, Node, Plan, ToolLimits, ToolSpec};
 
     use super::*;
 
@@ -297,6 +336,46 @@ mod tests {
         }
     }
 
+    struct ConcurrentExecutor {
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ToolExecutor for ConcurrentExecutor {
+        async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(input)
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingCache {
+        gets: Arc<AtomicUsize>,
+        inserts: Arc<AtomicUsize>,
+        inner: MemoryCache,
+    }
+
+    #[async_trait]
+    impl ToolCache for CountingCache {
+        async fn get(&self, key: &CacheKey) -> Option<Value> {
+            self.gets.fetch_add(1, Ordering::SeqCst);
+            self.inner.get(key).await
+        }
+
+        async fn insert(&self, key: CacheKey, output: Value) {
+            self.inserts.fetch_add(1, Ordering::SeqCst);
+            self.inner.insert(key, output).await;
+        }
+
+        async fn clear(&self) {
+            self.inner.clear().await;
+        }
+    }
+
     fn plan() -> Plan {
         let mut plan = Plan::new();
         plan.tools.insert(
@@ -400,6 +479,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_size_limit_splits_optimizer_groups() {
+        let mut plan = Plan::new();
+        plan.tools.insert(
+            "echo".into(),
+            ToolSpec::new("test")
+                .with_effects(Effects {
+                    batchable: true,
+                    ..Effects::pure()
+                })
+                .with_limits(ToolLimits {
+                    batch_size: Some(2),
+                    max_concurrency: None,
+                }),
+        );
+        for id in ["a", "b", "c", "d"] {
+            plan.nodes
+                .push(Node::new(id, "echo").with_input(json!({ "id": id })));
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let batches = Arc::new(AtomicUsize::new(0));
+
+        Runtime::new(BatchExecutor {
+            calls,
+            batches: batches.clone(),
+        })
+        .run(plan)
+        .await
+        .unwrap();
+
+        assert_eq!(batches.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn max_concurrency_limit_throttles_layer_execution() {
+        let mut plan = Plan::new();
+        plan.tools.insert(
+            "echo".into(),
+            ToolSpec::new("test")
+                .with_effects(Effects::read_only(["api:item"]))
+                .with_limits(ToolLimits {
+                    max_concurrency: Some(1),
+                    batch_size: None,
+                }),
+        );
+        plan.nodes
+            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
+        plan.nodes
+            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
+        let max_active = Arc::new(AtomicUsize::new(0));
+
+        Runtime::new(ConcurrentExecutor {
+            active: Arc::new(AtomicUsize::new(0)),
+            max_active: max_active.clone(),
+        })
+        .run(plan)
+        .await
+        .unwrap();
+
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn cache_survives_between_runtime_runs() {
         let mut plan = plan();
         plan.nodes
@@ -440,6 +581,29 @@ mod tests {
         runtime.run(plan).await.unwrap();
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn runtime_accepts_custom_cache_backend() {
+        let mut plan = plan();
+        plan.nodes
+            .push(Node::new("message", "echo").with_input(json!({ "ok": true })));
+        let gets = Arc::new(AtomicUsize::new(0));
+        let inserts = Arc::new(AtomicUsize::new(0));
+        let cache = CountingCache {
+            gets: gets.clone(),
+            inserts: inserts.clone(),
+            inner: MemoryCache::default(),
+        };
+        let runtime = Runtime::with_cache(
+            ToolRegistry::new().with_adapter("test", TestExecutor),
+            cache,
+        );
+
+        runtime.run(plan).await.unwrap();
+
+        assert_eq!(gets.load(Ordering::SeqCst), 1);
+        assert_eq!(inserts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -616,6 +780,7 @@ mod tests {
 
         assert_eq!(value["outputs"]["user"]["id"], "u_1");
         assert_eq!(value["trace"][0]["status"], "started");
+        assert!(value["trace"][1]["duration_ms"].is_number());
         assert!(value["optimization"]["deduplicated"].is_array());
     }
 

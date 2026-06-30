@@ -1,7 +1,9 @@
 [workspace]
 members = [
   "crates/tool-compiler-adapter-http",
+  "crates/tool-compiler-adapter-fs",
   "crates/tool-compiler-adapter-mcp",
+  "crates/tool-compiler-adapter-shell",
   "crates/tool-compiler-cli",
   "crates/tool-compiler-graph",
   "crates/tool-compiler-ir",

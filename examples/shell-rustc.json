@@ -1,0 +1,25 @@
+{
+  "version": "0",
+  "tools": {
+    "run": {
+      "adapter": "shell.local",
+      "effects": {
+        "idempotent": true,
+        "cacheable": false
+      }
+    }
+  },
+  "nodes": [
+    {
+      "id": "rustc",
+      "tool": "run",
+      "input": {
+        "program": "rustc",
+        "args": ["--version"]
+      }
+    }
+  ],
+  "outputs": {
+    "version": "rustc.output.stdout"
+  }
+}

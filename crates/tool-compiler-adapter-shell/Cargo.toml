@@ -1,6 +1,6 @@
 [package]
-name = "tool-compiler-adapter-http"
-description = "HTTP adapter contract helpers for tool-compiler."
+name = "tool-compiler-adapter-shell"
+description = "Process adapter for tool-compiler."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,6 +11,7 @@ version.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tool-compiler-ir.workspace = true
 tool-compiler-runtime.workspace = true
 

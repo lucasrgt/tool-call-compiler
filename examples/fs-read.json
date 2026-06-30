@@ -1,0 +1,33 @@
+{
+  "version": "0",
+  "tools": {
+    "read_file": {
+      "adapter": "fs.repo",
+      "effects": {
+        "reads": ["file:repo"],
+        "idempotent": true,
+        "cacheable": true,
+        "batchable": true
+      },
+      "limits": {
+        "batch_size": 2
+      }
+    }
+  },
+  "nodes": [
+    {
+      "id": "read_readme",
+      "tool": "read_file",
+      "input": { "path": "README.md" }
+    },
+    {
+      "id": "read_context",
+      "tool": "read_file",
+      "input": { "path": "CONTEXT.md" }
+    }
+  ],
+  "outputs": {
+    "readme": "read_readme.output.content",
+    "context": "read_context.output.content"
+  }
+}
