@@ -75,7 +75,7 @@ export interface ExplainReport {
   diagnostics: Diagnostic[];
 }
 
-export type TraceStatus = "started" | "finished" | { failed: string };
+export type TraceStatus = "started" | "finished" | "cache_hit" | { failed: string };
 
 export interface TraceEvent {
   node: string;
@@ -88,6 +88,17 @@ export interface RunResult {
   node_outputs: Record<string, Json>;
   trace: TraceEvent[];
   optimization: OptimizationReport;
+}
+
+export interface ConformanceCheck {
+  name: string;
+  passed: boolean;
+  message: string;
+}
+
+export interface ConformanceReport {
+  passed: boolean;
+  checks: ConformanceCheck[];
 }
 
 export class PlanBuilder {

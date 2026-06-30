@@ -1,0 +1,34 @@
+{
+  "version": "0",
+  "tools": {
+    "read_file": {
+      "adapter": "mcp.filesystem",
+      "effects": {
+        "reads": ["file:repo"],
+        "idempotent": true,
+        "cacheable": true,
+        "batchable": true
+      }
+    }
+  },
+  "nodes": [
+    {
+      "id": "read_readme",
+      "tool": "read_file",
+      "input": {
+        "path": "README.md"
+      }
+    },
+    {
+      "id": "read_context",
+      "tool": "read_file",
+      "input": {
+        "path": "CONTEXT.md"
+      }
+    }
+  ],
+  "outputs": {
+    "readme": "read_readme.output",
+    "context": "read_context.output"
+  }
+}

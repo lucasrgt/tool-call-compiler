@@ -16,6 +16,7 @@ async-trait.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tool-compiler-adapter-mcp = { path = "../tool-compiler-adapter-mcp" }
 tool-compiler-graph.workspace = true
 tool-compiler-ir.workspace = true
 tool-compiler-optimizer.workspace = true

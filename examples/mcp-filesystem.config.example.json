@@ -1,0 +1,11 @@
+{
+  "mcp": [
+    {
+      "adapter": "mcp.filesystem",
+      "name": "filesystem",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "env": {}
+    }
+  ]
+}

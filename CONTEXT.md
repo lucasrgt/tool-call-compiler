@@ -35,3 +35,15 @@ Avoid: putting adapter-specific behavior in the IR crate.
 The deterministic executor that schedules validated graph layers, resolves references, calls adapters, and records traces.
 
 Avoid: using "runtime" for the LLM planner.
+
+## Batch Group
+
+A same-layer set of compatible nodes that the optimizer selects for one adapter `call_batch` dispatch. It is compiler-selected from declared effects, not a user-written list of unrelated operations.
+
+Avoid: using "batch group" for arbitrary manual MCP aggregation.
+
+## Conformance Suite
+
+A small adapter verification flow that proves the common runtime contract: echo round-trip, batch dispatch shape, and tool error propagation.
+
+Avoid: treating conformance as full integration coverage for a downstream service.

@@ -79,9 +79,14 @@ The optimizer must refuse transformations when effects are missing or ambiguous.
 ## Implemented Slice
 
 - Runtime registry maps adapter names to executors.
-- CLI supports `validate`, `layers`, `optimize`, `explain`, `run`, and `bench`.
+- CLI supports `validate`, `layers`, `optimize`, `explain`, `run`, `bench`, and `serve-mcp`.
 - `run` executes a compiled tool graph and returns JSON outputs, node outputs, trace, and optimization report.
-- `bench` compares serial baseline vs compiled execution with the local adapter.
+- `bench` compares serial baseline vs compiled execution and clears runtime cache between iterations.
 - Optimizer reports deduplicated nodes and batchable groups.
+- Runtime executes optimizer-selected `batch_groups` through the `call_batch` adapter contract.
+- Runtime caches `pure`/`cacheable` tool outputs and reports cache hits in traces.
+- Runtime exports an adapter conformance suite covering echo round-trip, batch contract, and tool error propagation.
 - Explain diagnostics report why safe parallelization was blocked.
-- MCP adapter has a typed server/tool binding skeleton.
+- MCP adapter includes typed config, MCP executor, and stdio JSON-RPC client for `initialize` + `tools/call`.
+- CLI can load MCP stdio adapters from config and can expose the compiler itself as one MCP stdio tool.
+- Examples include a live MCP filesystem benchmark config.

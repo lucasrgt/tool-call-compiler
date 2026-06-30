@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { plan, pure, readOnly, ref, tc, valueRef, type RunResult } from "./index.js";
+import {
+  plan,
+  pure,
+  readOnly,
+  ref,
+  tc,
+  valueRef,
+  type ConformanceReport,
+  type RunResult,
+} from "./index.js";
 
 test("builds a stable plan json shape", () => {
   const built = plan()
@@ -35,9 +44,18 @@ test("run result type matches composite tool feedback shape", () => {
   const result: RunResult = {
     outputs: { answer: "ok" },
     node_outputs: { step: { answer: "ok" } },
-    trace: [{ node: "step", tool: "echo", status: "finished" }],
+    trace: [{ node: "step", tool: "echo", status: "cache_hit" }],
     optimization: { deduplicated: [], batch_groups: [] },
   };
 
   assert.equal(result.outputs.answer, "ok");
+});
+
+test("conformance report type is exported", () => {
+  const report: ConformanceReport = {
+    passed: true,
+    checks: [{ name: "echo_round_trip", passed: true, message: "passed" }],
+  };
+
+  assert.equal(report.checks[0]?.name, "echo_round_trip");
 });

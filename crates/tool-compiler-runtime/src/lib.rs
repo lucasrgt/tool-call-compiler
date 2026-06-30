@@ -5,14 +5,51 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use tokio::sync::Mutex;
 use tokio::task::JoinError;
-use tool_compiler_graph::{GraphError, validate};
-use tool_compiler_ir::{Node, NodeId, Plan, REF_KEY, ValueRef};
-use tool_compiler_optimizer::{OptimizationReport, OptimizedPlan, optimize};
+use tool_compiler_graph::GraphError;
+use tool_compiler_ir::{Node, NodeId, ValueRef};
+use tool_compiler_optimizer::OptimizationReport;
+
+mod conformance;
+mod execution;
+mod refs;
+
+pub use conformance::{ConformanceCheck, ConformanceReport, check_adapter_conformance};
+
+#[cfg(test)]
+use refs::resolve_input;
 
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
     async fn call(&self, tool: &str, input: Value) -> Result<Value, ToolExecutionError>;
+
+    async fn call_batch(
+        &self,
+        tool: &str,
+        inputs: Vec<BatchInput>,
+    ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
+        let mut outputs = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            outputs.push(BatchOutput {
+                node: input.node,
+                output: self.call(tool, input.input).await?,
+            });
+        }
+        Ok(outputs)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BatchInput {
+    pub node: NodeId,
+    pub input: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BatchOutput {
+    pub node: NodeId,
+    pub output: Value,
 }
 
 #[derive(Clone, Default)]
@@ -50,111 +87,7 @@ impl ToolRegistry {
 #[derive(Clone)]
 pub struct Runtime {
     registry: ToolRegistry,
-}
-
-impl Runtime {
-    pub fn new(executor: impl ToolExecutor + 'static) -> Self {
-        Self::from_registry(ToolRegistry::new().with_adapter("test", executor))
-    }
-
-    pub fn from_registry(registry: ToolRegistry) -> Self {
-        Self { registry }
-    }
-
-    pub async fn run(&self, plan: Plan) -> Result<RunResult, RuntimeError> {
-        let optimized = optimize(plan)?;
-        self.run_optimized(optimized).await
-    }
-
-    pub async fn run_serial(&self, plan: Plan) -> Result<RunResult, RuntimeError> {
-        let graph = validate(&plan)?;
-        let layers = graph
-            .layers()
-            .iter()
-            .flat_map(|layer| layer.iter().map(|node| vec![node.clone()]))
-            .collect();
-        self.run_layers(plan, layers, OptimizationReport::default())
-            .await
-    }
-
-    async fn run_optimized(&self, optimized: OptimizedPlan) -> Result<RunResult, RuntimeError> {
-        self.run_layers(
-            optimized.plan().clone(),
-            optimized.graph().layers().to_vec(),
-            optimized.report().clone(),
-        )
-        .await
-    }
-
-    async fn run_layers(
-        &self,
-        plan: Plan,
-        layers: Vec<Vec<NodeId>>,
-        optimization: OptimizationReport,
-    ) -> Result<RunResult, RuntimeError> {
-        let nodes_by_id = index_nodes(&plan);
-        let mut node_outputs = BTreeMap::<NodeId, Value>::new();
-        let mut trace = Vec::new();
-
-        for layer in &layers {
-            let mut tasks = tokio::task::JoinSet::new();
-
-            for node_id in layer {
-                let node = nodes_by_id
-                    .get(node_id)
-                    .expect("validated graph node should exist")
-                    .clone();
-                let input = resolve_input(&node.input, &node_outputs)?;
-                let adapter = plan
-                    .tools
-                    .get(&node.tool)
-                    .expect("validated tool should exist")
-                    .adapter
-                    .clone();
-                let executor = self
-                    .registry
-                    .executor(&adapter)
-                    .ok_or_else(|| RuntimeError::MissingAdapter { adapter })?;
-
-                tasks.spawn(async move {
-                    let started = TraceEvent::started(&node);
-                    let result = executor.call(&node.tool, input).await;
-                    (node, started, result)
-                });
-            }
-
-            while let Some(task) = tasks.join_next().await {
-                let (node, started, result) = task.map_err(RuntimeError::Join)?;
-                trace.push(started);
-
-                match result {
-                    Ok(output) => {
-                        trace.push(TraceEvent::finished(&node));
-                        node_outputs.insert(node.id, output);
-                    }
-                    Err(error) => {
-                        trace.push(TraceEvent::failed(&node, &error));
-                        return Err(RuntimeError::Tool {
-                            node: node.id,
-                            error,
-                        });
-                    }
-                }
-            }
-        }
-
-        let mut outputs = BTreeMap::new();
-        for (name, value_ref) in &plan.outputs {
-            outputs.insert(name.clone(), resolve_value_ref(value_ref, &node_outputs)?);
-        }
-
-        Ok(RunResult {
-            outputs,
-            node_outputs,
-            trace,
-            optimization,
-        })
-    }
+    cache: Arc<Mutex<BTreeMap<execution::CacheKey, Value>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -181,11 +114,11 @@ impl TraceEvent {
         }
     }
 
-    fn finished(node: &Node) -> Self {
+    fn finished_with_status(node: &Node, status: TraceStatus) -> Self {
         Self {
             node: node.id.clone(),
             tool: node.tool.clone(),
-            status: TraceStatus::Finished,
+            status,
         }
     }
 
@@ -203,6 +136,7 @@ impl TraceEvent {
 pub enum TraceStatus {
     Started,
     Finished,
+    CacheHit,
     Failed(String),
 }
 
@@ -231,6 +165,8 @@ pub enum RuntimeError {
     },
     #[error("join error: {0}")]
     Join(JoinError),
+    #[error("batch call did not return output for node '{node}'")]
+    BatchMissingOutput { node: NodeId },
     #[error("no executor registered for adapter '{adapter}'")]
     MissingAdapter { adapter: String },
     #[error("node '{0}' has no output yet")]
@@ -244,86 +180,14 @@ pub enum RuntimeError {
     InvalidRef(String),
 }
 
-fn index_nodes(plan: &Plan) -> BTreeMap<NodeId, Node> {
-    plan.nodes
-        .iter()
-        .map(|node| (node.id.clone(), node.clone()))
-        .collect()
-}
-
-fn resolve_input(
-    value: &Value,
-    node_outputs: &BTreeMap<NodeId, Value>,
-) -> Result<Value, RuntimeError> {
-    match value {
-        Value::Object(map) => {
-            if map.len() == 1
-                && let Some(Value::String(raw_ref)) = map.get(REF_KEY)
-            {
-                let value_ref = raw_ref
-                    .parse::<ValueRef>()
-                    .map_err(|error| RuntimeError::InvalidRef(error.to_string()))?;
-                return resolve_value_ref(&value_ref, node_outputs);
-            }
-
-            let mut resolved = serde_json::Map::new();
-            for (key, value) in map {
-                resolved.insert(key.clone(), resolve_input(value, node_outputs)?);
-            }
-            Ok(Value::Object(resolved))
-        }
-        Value::Array(items) => items
-            .iter()
-            .map(|item| resolve_input(item, node_outputs))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array),
-        _ => Ok(value.clone()),
-    }
-}
-
-fn resolve_value_ref(
-    value_ref: &ValueRef,
-    node_outputs: &BTreeMap<NodeId, Value>,
-) -> Result<Value, RuntimeError> {
-    let mut current = node_outputs
-        .get(value_ref.node())
-        .ok_or_else(|| RuntimeError::MissingNodeOutput(value_ref.node().to_owned()))?;
-
-    for segment in value_ref.path() {
-        current = match current {
-            Value::Object(map) => map.get(segment).ok_or_else(|| RuntimeError::MissingPath {
-                reference: value_ref.clone(),
-                segment: segment.clone(),
-            })?,
-            Value::Array(items) => {
-                let index = segment
-                    .parse::<usize>()
-                    .map_err(|_| RuntimeError::MissingPath {
-                        reference: value_ref.clone(),
-                        segment: segment.clone(),
-                    })?;
-                items.get(index).ok_or_else(|| RuntimeError::MissingPath {
-                    reference: value_ref.clone(),
-                    segment: segment.clone(),
-                })?
-            }
-            _ => {
-                return Err(RuntimeError::MissingPath {
-                    reference: value_ref.clone(),
-                    segment: segment.clone(),
-                });
-            }
-        };
-    }
-
-    Ok(current.clone())
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use async_trait::async_trait;
     use serde_json::json;
-    use tool_compiler_ir::{Effects, Node, ToolSpec};
+    use tool_compiler_ir::{Effects, Node, Plan, ToolSpec};
 
     use super::*;
 
@@ -338,6 +202,98 @@ mod tests {
                 "fail" => Err(ToolExecutionError::new("planned failure")),
                 other => Err(ToolExecutionError::new(format!("unknown tool {other}"))),
             }
+        }
+    }
+
+    struct BatchExecutor {
+        calls: Arc<AtomicUsize>,
+        batches: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ToolExecutor for BatchExecutor {
+        async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(input)
+        }
+
+        async fn call_batch(
+            &self,
+            _tool: &str,
+            inputs: Vec<BatchInput>,
+        ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
+            self.batches.fetch_add(1, Ordering::SeqCst);
+            Ok(inputs
+                .into_iter()
+                .map(|input| BatchOutput {
+                    node: input.node,
+                    output: input.input,
+                })
+                .collect())
+        }
+    }
+
+    struct CountingExecutor {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ToolExecutor for CountingExecutor {
+        async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(input)
+        }
+    }
+
+    struct FailingBatchExecutor;
+
+    #[async_trait]
+    impl ToolExecutor for FailingBatchExecutor {
+        async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
+            Ok(input)
+        }
+
+        async fn call_batch(
+            &self,
+            _tool: &str,
+            _inputs: Vec<BatchInput>,
+        ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
+            Err(ToolExecutionError::new("batch failed"))
+        }
+    }
+
+    struct MissingBatchOutputExecutor;
+
+    #[async_trait]
+    impl ToolExecutor for MissingBatchOutputExecutor {
+        async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
+            Ok(input)
+        }
+
+        async fn call_batch(
+            &self,
+            _tool: &str,
+            _inputs: Vec<BatchInput>,
+        ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct WrongExecutor;
+
+    #[async_trait]
+    impl ToolExecutor for WrongExecutor {
+        async fn call(&self, _tool: &str, _input: Value) -> Result<Value, ToolExecutionError> {
+            Ok(json!({ "wrong": true }))
+        }
+    }
+
+    struct ErrorExecutor;
+
+    #[async_trait]
+    impl ToolExecutor for ErrorExecutor {
+        async fn call(&self, _tool: &str, _input: Value) -> Result<Value, ToolExecutionError> {
+            Err(ToolExecutionError::new("always fails"))
         }
     }
 
@@ -408,6 +364,209 @@ mod tests {
 
         assert_eq!(result.node_outputs.len(), 2);
         assert!(result.optimization.deduplicated.is_empty());
+    }
+
+    #[tokio::test]
+    async fn batch_groups_use_batch_executor_contract() {
+        let mut plan = Plan::new();
+        plan.tools.insert(
+            "echo".into(),
+            ToolSpec::new("test").with_effects(Effects {
+                batchable: true,
+                ..Effects::pure()
+            }),
+        );
+        plan.nodes
+            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
+        plan.nodes
+            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
+        plan.outputs.insert("a".into(), ValueRef::output("a"));
+        plan.outputs.insert("b".into(), ValueRef::output("b"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let batches = Arc::new(AtomicUsize::new(0));
+
+        let result = Runtime::new(BatchExecutor {
+            calls: calls.clone(),
+            batches: batches.clone(),
+        })
+        .run(plan)
+        .await
+        .unwrap();
+
+        assert_eq!(result.outputs["a"], json!({ "id": "a" }));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(batches.load(Ordering::SeqCst), 1);
+        assert_eq!(result.optimization.batch_groups.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_survives_between_runtime_runs() {
+        let mut plan = plan();
+        plan.nodes
+            .push(Node::new("message", "echo").with_input(json!({ "ok": true })));
+        plan.outputs
+            .insert("message".into(), ValueRef::output("message"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(CountingExecutor {
+            calls: calls.clone(),
+        });
+
+        runtime.run(plan.clone()).await.unwrap();
+        let second = runtime.run(plan).await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            second
+                .trace
+                .iter()
+                .any(|event| event.status == TraceStatus::CacheHit)
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_cache_removes_cached_outputs() {
+        let mut plan = plan();
+        plan.nodes
+            .push(Node::new("message", "echo").with_input(json!({ "ok": true })));
+        plan.outputs
+            .insert("message".into(), ValueRef::output("message"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(CountingExecutor {
+            calls: calls.clone(),
+        });
+
+        runtime.run(plan.clone()).await.unwrap();
+        runtime.clear_cache().await;
+        runtime.run(plan).await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cached_batch_group_returns_without_calling_executor_again() {
+        let mut plan = Plan::new();
+        plan.tools.insert(
+            "echo".into(),
+            ToolSpec::new("test").with_effects(Effects {
+                batchable: true,
+                ..Effects::pure()
+            }),
+        );
+        plan.nodes
+            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
+        plan.nodes
+            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
+        plan.outputs.insert("a".into(), ValueRef::output("a"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let batches = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(BatchExecutor {
+            calls,
+            batches: batches.clone(),
+        });
+
+        runtime.run(plan.clone()).await.unwrap();
+        let second = runtime.run(plan).await.unwrap();
+
+        assert_eq!(batches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            second
+                .trace
+                .iter()
+                .filter(|event| event.status == TraceStatus::CacheHit)
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_missing_adapter_for_batch_group() {
+        let mut plan = Plan::new();
+        plan.tools.insert(
+            "echo".into(),
+            ToolSpec::new("missing").with_effects(Effects {
+                batchable: true,
+                ..Effects::pure()
+            }),
+        );
+        plan.nodes
+            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
+        plan.nodes
+            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
+
+        let error = Runtime::from_registry(ToolRegistry::new())
+            .run(plan)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RuntimeError::MissingAdapter { .. }));
+    }
+
+    #[tokio::test]
+    async fn reports_batch_executor_errors() {
+        let mut plan = Plan::new();
+        plan.tools.insert(
+            "echo".into(),
+            ToolSpec::new("test").with_effects(Effects {
+                batchable: true,
+                ..Effects::pure()
+            }),
+        );
+        plan.nodes
+            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
+        plan.nodes
+            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
+
+        let error = Runtime::new(FailingBatchExecutor)
+            .run(plan)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RuntimeError::Tool { .. }));
+    }
+
+    #[tokio::test]
+    async fn reports_missing_batch_outputs() {
+        let mut plan = Plan::new();
+        plan.tools.insert(
+            "echo".into(),
+            ToolSpec::new("test").with_effects(Effects {
+                batchable: true,
+                ..Effects::pure()
+            }),
+        );
+        plan.nodes
+            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
+        plan.nodes
+            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
+
+        let error = Runtime::new(MissingBatchOutputExecutor)
+            .run(plan)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RuntimeError::BatchMissingOutput { .. }));
+    }
+
+    #[tokio::test]
+    async fn non_cacheable_tools_execute_every_time() {
+        let mut plan = Plan::new();
+        plan.tools.insert(
+            "write".into(),
+            ToolSpec::new("test").with_effects(Effects {
+                writes: ["db:item"].into_iter().map(String::from).collect(),
+                ..Effects::default()
+            }),
+        );
+        plan.nodes.push(Node::new("write", "write"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::new(CountingExecutor {
+            calls: calls.clone(),
+        });
+
+        runtime.run(plan.clone()).await.unwrap();
+        runtime.run(plan).await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -507,5 +666,61 @@ mod tests {
             resolve_input(&json!({ "$ref": "not-a-runtime-ref" }), &BTreeMap::new()).unwrap_err();
 
         assert!(matches!(error, RuntimeError::InvalidRef(_)));
+    }
+
+    #[tokio::test]
+    async fn reports_invalid_array_path_segment() {
+        let mut outputs = BTreeMap::new();
+        outputs.insert("items".to_owned(), json!(["a"]));
+        let error = resolve_input(&json!({ "$ref": "items.output.nope" }), &outputs).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::MissingPath { .. }));
+    }
+
+    #[tokio::test]
+    async fn reports_out_of_bounds_array_path_segment() {
+        let mut outputs = BTreeMap::new();
+        outputs.insert("items".to_owned(), json!(["a"]));
+        let error = resolve_input(&json!({ "$ref": "items.output.9" }), &outputs).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::MissingPath { .. }));
+    }
+
+    #[tokio::test]
+    async fn reports_scalar_path_segment() {
+        let mut outputs = BTreeMap::new();
+        outputs.insert("value".to_owned(), json!("text"));
+        let error = resolve_input(&json!({ "$ref": "value.output.name" }), &outputs).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::MissingPath { .. }));
+    }
+
+    #[tokio::test]
+    async fn conformance_suite_reports_adapter_checks() {
+        let report = check_adapter_conformance("test", TestExecutor).await;
+
+        assert!(report.passed);
+        assert_eq!(report.checks.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn conformance_suite_reports_wrong_outputs() {
+        let report = check_adapter_conformance("test", WrongExecutor).await;
+
+        assert!(!report.passed);
+        assert!(report.checks.iter().any(|check| !check.passed));
+    }
+
+    #[tokio::test]
+    async fn conformance_suite_reports_executor_errors() {
+        let report = check_adapter_conformance("test", ErrorExecutor).await;
+
+        assert!(!report.passed);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.message.contains("always fails"))
+        );
     }
 }

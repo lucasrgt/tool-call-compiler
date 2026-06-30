@@ -46,6 +46,7 @@ Batching and parallel execution are table stakes. The core moat is effect-safe c
 cargo run -p tool-compiler-cli -- run examples/sequential-ref.json
 cargo run -p tool-compiler-cli -- explain examples/write-conflict.json
 cargo run -p tool-compiler-cli -- bench examples/bench-sleep.json --iterations 3
+cargo run -p tool-compiler-cli -- serve-mcp
 ```
 
 The CLI ships with a deterministic `local` adapter for examples:
@@ -56,6 +57,39 @@ The CLI ships with a deterministic `local` adapter for examples:
 - `fail`: returns a tool error.
 
 `explain` reports optimization output, execution layers, batchable groups, and diagnostics such as missing effects or read/write conflicts.
+
+For a live MCP filesystem smoke benchmark:
+
+```powershell
+cargo run -p tool-compiler-cli -- bench examples/mcp-filesystem-bench.json --mcp-config examples/mcp-filesystem.config.example.json --iterations 1
+```
+
+The MCP config launches `@modelcontextprotocol/server-filesystem` over stdio and
+registers it as adapter `mcp.filesystem`.
+
+## MCP Server
+
+`serve-mcp` exposes the compiler itself as one MCP stdio tool:
+
+- `run_compiled_tool_graph`: accepts `{ "plan": <Plan> }`.
+- Returns MCP `structuredContent` containing the same `RunResult` as the CLI.
+
+This is the product loop directly: one model-visible tool call, many internal tool
+operations, one compact result back to the model.
+
+## Adapter Contracts
+
+Runtime adapters implement:
+
+- `call(tool, input)` for a single operation.
+- `call_batch(tool, inputs)` for optimizer-selected batch groups. The default
+  implementation is sequential, so adapters can opt into native batching later.
+
+The runtime also keeps an in-memory cache for `pure`/`cacheable` tools and reports
+cache hits in the trace as `cache_hit`.
+
+`tool-compiler-runtime` exports `check_adapter_conformance(...)` for adapter smoke
+tests: echo round-trip, batch contract, and tool error propagation.
 
 ## Quality Gates
 

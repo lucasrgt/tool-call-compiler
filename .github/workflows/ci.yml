@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: cargo run -p xtask -- check
+      - run: npm test
+      - run: cargo run -p tool-compiler-cli -- run examples/sequential-ref.json
+      - run: cargo run -p tool-compiler-cli -- explain examples/write-conflict.json
+      - run: cargo run -p tool-compiler-cli -- bench examples/bench-sleep.json --iterations 1
