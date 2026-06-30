@@ -1,0 +1,35 @@
+{
+  "version": "0",
+  "tools": {
+    "knowledge_lookup": {
+      "adapter": "local",
+      "effects": {
+        "reads": ["knowledge:workspace"],
+        "writes": [],
+        "idempotent": true,
+        "cacheable": true,
+        "batchable": true
+      },
+      "limits": {
+        "batch_size": 8,
+        "max_concurrency": 4
+      }
+    }
+  },
+  "recipe": {
+    "kind": "fan_out",
+    "tool": "knowledge_lookup",
+    "items": [
+      { "q": "tool compiler" },
+      { "q": "codegraph" },
+      { "q": "aerofortress harness integration" }
+    ],
+    "node_prefix": "lookup_",
+    "input_key": "query"
+  },
+  "outputs": {
+    "tool_compiler": "lookup_1.output",
+    "codegraph": "lookup_2.output",
+    "integration": "lookup_3.output"
+  }
+}

@@ -3,8 +3,10 @@ import test from "node:test";
 
 import {
   capabilities,
+  compileRecipe,
   compileIntent,
   cost,
+  fanOut,
   intent,
   plan,
   PLAN_SCHEMA,
@@ -84,6 +86,22 @@ test("intent compiles refs and explicit ordering into plan dependencies", () => 
 
   assert.deepEqual(compiled.nodes[1]?.depends_on, ["audit", "user"]);
   assert.equal(compiled.outputs.profile, "profile.output");
+});
+
+test("recipe compiles fan-out into independent plan nodes", () => {
+  const source = tc
+    .recipe(fanOut("read", ["a.md", "b.md"], { nodePrefix: "file_", inputKey: "path" }))
+    .tool("read", pure("fs.repo"))
+    .output("first", valueRef("file_1"))
+    .toJSON();
+
+  const compiled = compileRecipe(source);
+
+  assert.equal(compiled.nodes.length, 2);
+  assert.equal(compiled.nodes[0]?.id, "file_1");
+  assert.deepEqual(compiled.nodes[0]?.input, { path: "a.md" });
+  assert.equal(compiled.outputs.first, "file_1.output");
+  assert.equal(tc.RECIPE_SCHEMA.properties.version.const, "0");
 });
 
 test("run result type matches composite tool feedback shape", () => {

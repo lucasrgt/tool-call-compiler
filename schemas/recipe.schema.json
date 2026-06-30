@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tool-call-compiler.dev/schemas/recipe.schema.json",
+  "title": "Tool Call Compiler Recipe Plan",
+  "type": "object",
+  "required": ["version", "tools", "recipe", "outputs"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": "0" },
+    "tools": {
+      "type": "object",
+      "additionalProperties": { "$ref": "plan.schema.json#/$defs/toolSpec" }
+    },
+    "recipe": { "$ref": "#/$defs/recipe" },
+    "outputs": { "type": "object", "additionalProperties": { "type": "string" } }
+  },
+  "$defs": {
+    "recipe": {
+      "oneOf": [{ "$ref": "#/$defs/fanOut" }]
+    },
+    "fanOut": {
+      "type": "object",
+      "required": ["kind", "tool", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "fan_out" },
+        "tool": { "type": "string", "minLength": 1 },
+        "items": { "type": "array", "items": true },
+        "node_prefix": { "type": "string", "minLength": 1 },
+        "input_key": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

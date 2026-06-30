@@ -16,9 +16,9 @@ async-trait.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tool-compiler-adapter-fs = { path = "../tool-compiler-adapter-fs" }
-tool-compiler-adapter-mcp = { path = "../tool-compiler-adapter-mcp" }
-tool-compiler-adapter-shell = { path = "../tool-compiler-adapter-shell" }
+tool-compiler-adapter-fs = { version = "0.1.0", path = "../tool-compiler-adapter-fs" }
+tool-compiler-adapter-mcp = { version = "0.1.0", path = "../tool-compiler-adapter-mcp" }
+tool-compiler-adapter-shell = { version = "0.1.0", path = "../tool-compiler-adapter-shell" }
 tool-compiler-graph.workspace = true
 tool-compiler-ir.workspace = true
 tool-compiler-optimizer.workspace = true

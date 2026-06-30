@@ -41,7 +41,11 @@ Batching and parallel execution are table stakes. The core moat is effect-safe c
 - `sdk/node`: TypeScript builder SDK.
 - `schemas/plan.schema.json`: public JSON Schema for executable plans.
 - `schemas/intent.schema.json`: public JSON Schema for agent intent plans.
+- `schemas/recipe.schema.json`: public JSON Schema for high-level recipes.
 - `docs/reference-projects.md`: notes from comparable open source projects pulled with `opensrc`.
+- `docs/getting-started.md`: embedding, SDK, and MCP wrapper entry points.
+- `docs/aerofortress-integration.md`: direct harness integration strategy.
+- `docs/benchmarks.md`: benchmark commands and interpretation.
 - `crates/xtask`: local quality gates.
 
 ## Try It
@@ -50,6 +54,8 @@ Batching and parallel execution are table stakes. The core moat is effect-safe c
 cargo run -p tool-compiler-cli -- run examples/sequential-ref.json
 cargo run -p tool-compiler-cli -- compile-intent examples/dogfood-aerofortress-intent.json
 cargo run -p tool-compiler-cli -- run-intent examples/dogfood-aerofortress-intent.json
+cargo run -p tool-compiler-cli -- compile-recipe examples/recipe-fanout.json
+cargo run -p tool-compiler-cli -- run-recipe examples/recipe-fanout.json
 cargo run -p tool-compiler-cli -- explain examples/write-conflict.json
 cargo run -p tool-compiler-cli -- bench examples/bench-compiled-tool-calls.json --iterations 3
 cargo run -p tool-compiler-cli -- serve-mcp
@@ -68,6 +74,10 @@ The CLI ships with a deterministic `local` adapter for examples:
 does that compile step and immediately returns the same composite feedback as
 `run`.
 
+`compile-recipe` lowers supported high-level recipes into the executable plan IR.
+The first recipe is `fan_out`, for cases where one compact intent should become
+many independent calls.
+
 `explain` reports optimization output, execution layers, fused batch groups, summary counts, and diagnostics such as missing effects or read/write conflicts.
 
 For a live MCP filesystem smoke benchmark:
@@ -84,6 +94,7 @@ registers it as adapter `mcp.filesystem`.
 `serve-mcp` exposes the compiler itself as one MCP stdio tool:
 
 - `run_compiled_tool_graph`: accepts `{ "plan": <Plan> }`.
+- `run_compiled_tool_recipe`: accepts `{ "recipe": <RecipePlan> }`.
 - Returns MCP `structuredContent` containing the same `RunResult` as the CLI.
 
 This is the product loop directly: one model-visible tool call, many internal tool

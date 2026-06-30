@@ -20,5 +20,25 @@
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
       "env": {}
     }
+  ],
+  "capabilities": [
+    {
+      "tool": "read_file",
+      "effects": {
+        "reads": ["fs:repo"],
+        "writes": [],
+        "idempotent": true,
+        "cacheable": true,
+        "batchable": true
+      },
+      "limits": {
+        "batch_size": 16,
+        "max_concurrency": 8
+      },
+      "cost": {
+        "fixed_ms": 3,
+        "per_call_ms": 1
+      }
+    }
   ]
 }

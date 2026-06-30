@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use thiserror::Error;
 use tool_compiler_ir::{
     CURRENT_VERSION, Node, NodeId, Plan, ToolName, ToolSpec, ValueRef, collect_refs,
@@ -45,6 +45,64 @@ pub struct IntentStep {
     pub after: Vec<NodeId>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecipePlan {
+    pub version: String,
+    #[serde(default)]
+    pub tools: BTreeMap<ToolName, ToolSpec>,
+    pub recipe: Recipe,
+    #[serde(default)]
+    pub outputs: BTreeMap<String, ValueRef>,
+}
+
+impl RecipePlan {
+    pub fn new(recipe: Recipe) -> Self {
+        Self {
+            version: CURRENT_VERSION.to_owned(),
+            tools: BTreeMap::new(),
+            recipe,
+            outputs: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Recipe {
+    FanOut(FanOutRecipe),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FanOutRecipe {
+    pub tool: ToolName,
+    pub items: Vec<Value>,
+    #[serde(default = "default_node_prefix")]
+    pub node_prefix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_key: Option<String>,
+}
+
+impl FanOutRecipe {
+    pub fn new(tool: impl Into<ToolName>, items: impl IntoIterator<Item = Value>) -> Self {
+        Self {
+            tool: tool.into(),
+            items: items.into_iter().collect(),
+            node_prefix: default_node_prefix(),
+            input_key: None,
+        }
+    }
+
+    pub fn with_node_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.node_prefix = prefix.into();
+        self
+    }
+
+    pub fn with_input_key(mut self, key: impl Into<String>) -> Self {
+        self.input_key = Some(key.into());
+        self
+    }
+}
+
 impl IntentStep {
     pub fn new(id: impl Into<NodeId>, tool: impl Into<ToolName>) -> Self {
         Self {
@@ -74,6 +132,33 @@ pub enum PlannerError {
     InvalidRef(#[from] tool_compiler_ir::RefParseError),
 }
 
+pub fn compile_recipe(recipe_plan: RecipePlan) -> Result<Plan, PlannerError> {
+    if recipe_plan.version != CURRENT_VERSION {
+        return Err(PlannerError::UnsupportedVersion(recipe_plan.version));
+    }
+
+    let mut plan = Plan::new();
+    plan.tools = recipe_plan.tools;
+    plan.outputs = recipe_plan.outputs;
+    match recipe_plan.recipe {
+        Recipe::FanOut(recipe) => {
+            plan.nodes = recipe
+                .items
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    Node::new(
+                        format!("{}{}", recipe.node_prefix, index + 1),
+                        recipe.tool.clone(),
+                    )
+                    .with_input(recipe_input(recipe.input_key.as_deref(), item))
+                })
+                .collect();
+        }
+    }
+    Ok(plan)
+}
+
 pub fn compile_intent(intent: IntentPlan) -> Result<Plan, PlannerError> {
     if intent.version != CURRENT_VERSION {
         return Err(PlannerError::UnsupportedVersion(intent.version));
@@ -89,6 +174,19 @@ pub fn compile_intent(intent: IntentPlan) -> Result<Plan, PlannerError> {
         .collect::<Result<_, _>>()?;
 
     Ok(plan)
+}
+
+fn default_node_prefix() -> String {
+    "item_".into()
+}
+
+fn recipe_input(input_key: Option<&str>, item: Value) -> Value {
+    let Some(key) = input_key else {
+        return item;
+    };
+    let mut value = Map::new();
+    value.insert(key.to_owned(), item);
+    Value::Object(value)
 }
 
 fn compile_step(step: IntentStep) -> Result<Node, PlannerError> {
@@ -155,5 +253,28 @@ mod tests {
             compile_intent(intent).unwrap_err(),
             PlannerError::UnsupportedVersion("future".into())
         );
+    }
+
+    #[test]
+    fn compiles_fan_out_recipe() {
+        let mut recipe = RecipePlan::new(Recipe::FanOut(
+            FanOutRecipe::new("echo", [json!("a"), json!("b")])
+                .with_node_prefix("read_")
+                .with_input_key("path"),
+        ));
+        recipe.tools.insert(
+            "echo".into(),
+            ToolSpec::new("test").with_effects(Effects::pure()),
+        );
+        recipe
+            .outputs
+            .insert("first".into(), ValueRef::output("read_1"));
+
+        let plan = compile_recipe(recipe).unwrap();
+
+        assert_eq!(plan.nodes.len(), 2);
+        assert_eq!(plan.nodes[0].id, "read_1");
+        assert_eq!(plan.nodes[0].input, json!({ "path": "a" }));
+        assert_eq!(plan.outputs["first"], ValueRef::output("read_1"));
     }
 }

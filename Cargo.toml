@@ -17,7 +17,7 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/aerofortress/tool-call-compiler"
+repository = "https://github.com/lucasrgt/tool-call-compiler"
 rust-version = "1.96"
 version = "0.1.0"
 
@@ -28,8 +28,8 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 thiserror = "2.0.12"
 tokio = { version = "1.45.1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
-tool-compiler-graph = { path = "crates/tool-compiler-graph" }
-tool-compiler-ir = { path = "crates/tool-compiler-ir" }
-tool-compiler-optimizer = { path = "crates/tool-compiler-optimizer" }
-tool-compiler-planner = { path = "crates/tool-compiler-planner" }
-tool-compiler-runtime = { path = "crates/tool-compiler-runtime" }
+tool-compiler-graph = { version = "0.1.0", path = "crates/tool-compiler-graph" }
+tool-compiler-ir = { version = "0.1.0", path = "crates/tool-compiler-ir" }
+tool-compiler-optimizer = { version = "0.1.0", path = "crates/tool-compiler-optimizer" }
+tool-compiler-planner = { version = "0.1.0", path = "crates/tool-compiler-planner" }
+tool-compiler-runtime = { version = "0.1.0", path = "crates/tool-compiler-runtime" }

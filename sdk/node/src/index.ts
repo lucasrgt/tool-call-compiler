@@ -82,6 +82,23 @@ export interface IntentPlan {
   outputs: Record<string, string>;
 }
 
+export interface FanOutRecipe {
+  kind: "fan_out";
+  tool: string;
+  items: Json[];
+  node_prefix?: string;
+  input_key?: string;
+}
+
+export type Recipe = FanOutRecipe;
+
+export interface RecipePlan {
+  version: "0";
+  tools: Record<string, ToolSpec>;
+  recipe: Recipe;
+  outputs: Record<string, string>;
+}
+
 export interface DeduplicatedNode {
   removed: string;
   canonical: string;
@@ -219,12 +236,82 @@ export class IntentBuilder {
   }
 }
 
+export class RecipeBuilder {
+  private readonly value: RecipePlan;
+
+  constructor(recipeValue: Recipe) {
+    this.value = {
+      version: "0",
+      tools: {},
+      recipe: structuredClone(recipeValue),
+      outputs: {},
+    };
+  }
+
+  tool(name: string, spec: ToolSpec): this {
+    this.value.tools[name] = spec;
+    return this;
+  }
+
+  output(name: string, valueRef: string): this {
+    this.value.outputs[name] = valueRef;
+    return this;
+  }
+
+  toJSON(): RecipePlan {
+    return structuredClone(this.value);
+  }
+}
+
 export function plan(): PlanBuilder {
   return new PlanBuilder();
 }
 
 export function intent(): IntentBuilder {
   return new IntentBuilder();
+}
+
+export function recipe(recipeValue: Recipe): RecipeBuilder {
+  return new RecipeBuilder(recipeValue);
+}
+
+export function fanOut(
+  tool: string,
+  items: Json[],
+  options: { nodePrefix?: string; inputKey?: string } = {},
+): FanOutRecipe {
+  return {
+    kind: "fan_out",
+    tool,
+    items,
+    ...(options.nodePrefix ? { node_prefix: options.nodePrefix } : {}),
+    ...(options.inputKey ? { input_key: options.inputKey } : {}),
+  };
+}
+
+export function compileRecipe(recipePlan: RecipePlan): Plan {
+  if (recipePlan.version !== "0") {
+    throw new Error(`unsupported recipe version '${recipePlan.version}'`);
+  }
+
+  switch (recipePlan.recipe.kind) {
+    case "fan_out": {
+      const nodePrefix = recipePlan.recipe.node_prefix ?? "item_";
+      return {
+        version: "0",
+        tools: structuredClone(recipePlan.tools),
+        nodes: recipePlan.recipe.items.map((item, index) => ({
+          id: `${nodePrefix}${index + 1}`,
+          tool: recipePlan.recipe.tool,
+          input: recipePlan.recipe.input_key
+            ? { [recipePlan.recipe.input_key]: structuredClone(item) }
+            : structuredClone(item),
+          depends_on: [],
+        })),
+        outputs: structuredClone(recipePlan.outputs),
+      };
+    }
+  }
 }
 
 export function compileIntent(intentPlan: IntentPlan): Plan {
@@ -451,10 +538,48 @@ export const INTENT_SCHEMA = {
   },
 } as const;
 
+export const RECIPE_SCHEMA = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: "https://tool-call-compiler.dev/schemas/recipe.schema.json",
+  title: "Tool Call Compiler Recipe Plan",
+  type: "object",
+  required: ["version", "tools", "recipe", "outputs"],
+  additionalProperties: false,
+  properties: {
+    version: { const: "0" },
+    tools: {
+      type: "object",
+      additionalProperties: { $ref: "plan.schema.json#/$defs/toolSpec" },
+    },
+    recipe: { $ref: "#/$defs/recipe" },
+    outputs: { type: "object", additionalProperties: { type: "string" } },
+  },
+  $defs: {
+    recipe: {
+      oneOf: [{ $ref: "#/$defs/fanOut" }],
+    },
+    fanOut: {
+      type: "object",
+      required: ["kind", "tool", "items"],
+      additionalProperties: false,
+      properties: {
+        kind: { const: "fan_out" },
+        tool: { type: "string", minLength: 1 },
+        items: { type: "array", items: true },
+        node_prefix: { type: "string", minLength: 1 },
+        input_key: { type: "string", minLength: 1 },
+      },
+    },
+  },
+} as const;
+
 export const tc = {
   plan,
   intent,
+  recipe,
+  fanOut,
   compileIntent,
+  compileRecipe,
   ref,
   valueRef,
   effects: {
@@ -467,4 +592,5 @@ export const tc = {
   capabilities,
   PLAN_SCHEMA,
   INTENT_SCHEMA,
+  RECIPE_SCHEMA,
 };

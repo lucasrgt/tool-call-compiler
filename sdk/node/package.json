@@ -2,6 +2,12 @@
   "name": "@tool-compiler/sdk-node",
   "version": "0.1.0",
   "description": "TypeScript builder SDK for tool-compiler plans.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lucasrgt/tool-call-compiler.git",
+    "directory": "sdk/node"
+  },
+  "license": "MIT OR Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -23,4 +29,3 @@
     "typescript": "^5.8.3"
   }
 }
-

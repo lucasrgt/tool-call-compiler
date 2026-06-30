@@ -4,21 +4,20 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+mod local;
+
+use local::LocalExecutor;
 use tool_compiler_adapter_fs::FsExecutor;
 use tool_compiler_adapter_mcp::{McpExecutor, McpServerConfig, McpStdioClient, McpTransport};
 use tool_compiler_adapter_shell::ShellExecutor;
 use tool_compiler_graph::validate;
 use tool_compiler_ir::Plan;
 use tool_compiler_optimizer::{explain, optimize};
-use tool_compiler_planner::{IntentPlan, compile_intent};
-use tool_compiler_runtime::{
-    BatchInput, BatchOutput, RunResult, Runtime, ToolExecutionError, ToolExecutor, ToolRegistry,
-    TraceStatus,
-};
+use tool_compiler_planner::{IntentPlan, RecipePlan, compile_intent, compile_recipe};
+use tool_compiler_runtime::{RunResult, Runtime, ToolCapabilities, ToolRegistry, TraceStatus};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -44,8 +43,16 @@ enum Command {
     CompileIntent {
         intent: PathBuf,
     },
+    CompileRecipe {
+        recipe: PathBuf,
+    },
     RunIntent {
         intent: PathBuf,
+        #[arg(long = "runtime-config", alias = "mcp-config")]
+        runtime_config: Option<PathBuf>,
+    },
+    RunRecipe {
+        recipe: PathBuf,
         #[arg(long = "runtime-config", alias = "mcp-config")]
         runtime_config: Option<PathBuf>,
     },
@@ -96,12 +103,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let plan = compile_intent(intent)?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
         }
+        Command::CompileRecipe { recipe } => {
+            let recipe = read_recipe(recipe)?;
+            let plan = compile_recipe(recipe)?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
         Command::RunIntent {
             intent,
             runtime_config,
         } => {
             let intent = read_intent(intent)?;
             let plan = compile_intent(intent)?;
+            let result = configured_runtime(runtime_config)?.run(plan).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Command::RunRecipe {
+            recipe,
+            runtime_config,
+        } => {
+            let recipe = read_recipe(recipe)?;
+            let plan = compile_recipe(recipe)?;
             let result = configured_runtime(runtime_config)?.run(plan).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
@@ -153,6 +174,11 @@ fn read_intent(path: PathBuf) -> Result<IntentPlan, Box<dyn Error>> {
     Ok(serde_json::from_str(&content)?)
 }
 
+fn read_recipe(path: PathBuf) -> Result<RecipePlan, Box<dyn Error>> {
+    let content = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&content)?)
+}
+
 fn configured_runtime(mcp_config: Option<PathBuf>) -> Result<Runtime, Box<dyn Error>> {
     let mut registry = ToolRegistry::new().with_adapter("local", LocalExecutor);
 
@@ -182,6 +208,9 @@ fn configured_runtime(mcp_config: Option<PathBuf>) -> Result<Runtime, Box<dyn Er
                 executor = executor.with_env(key, value);
             }
             registry.register_adapter(shell.adapter, executor);
+        }
+        for capability in config.capabilities {
+            registry.register_tool_capabilities(capability.tool, capability.capabilities);
         }
     }
 
@@ -278,6 +307,8 @@ struct RuntimeConfig {
     fs: Vec<FsBinding>,
     #[serde(default)]
     shell: Vec<ShellBinding>,
+    #[serde(default)]
+    capabilities: Vec<CapabilityBinding>,
 }
 
 #[derive(Deserialize)]
@@ -304,6 +335,13 @@ struct ShellBinding {
     cwd: Option<PathBuf>,
     #[serde(default)]
     env: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct CapabilityBinding {
+    tool: String,
+    #[serde(flatten)]
+    capabilities: ToolCapabilities,
 }
 
 async fn serve_mcp(runtime: Runtime) -> Result<(), Box<dyn Error>> {
@@ -352,16 +390,26 @@ async fn call_mcp_tool(runtime: &Runtime, request: &Value) -> Result<Value, Stri
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| "tools/call missing name".to_owned())?;
-    if name != "run_compiled_tool_graph" {
-        return Err(format!("unknown tool '{name}'"));
-    }
-
-    let plan = params
+    let arguments = params
         .get("arguments")
-        .and_then(|arguments| arguments.get("plan"))
-        .cloned()
-        .ok_or_else(|| "run_compiled_tool_graph requires arguments.plan".to_owned())?;
-    let plan: Plan = serde_json::from_value(plan).map_err(|error| error.to_string())?;
+        .ok_or_else(|| "tools/call missing arguments".to_owned())?;
+    let plan = match name {
+        "run_compiled_tool_graph" => arguments
+            .get("plan")
+            .cloned()
+            .ok_or_else(|| "run_compiled_tool_graph requires arguments.plan".to_owned())
+            .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?,
+        "run_compiled_tool_recipe" => arguments
+            .get("recipe")
+            .cloned()
+            .ok_or_else(|| "run_compiled_tool_recipe requires arguments.recipe".to_owned())
+            .and_then(|value| {
+                let recipe: RecipePlan =
+                    serde_json::from_value(value).map_err(|error| error.to_string())?;
+                compile_recipe(recipe).map_err(|error| error.to_string())
+            })?,
+        _ => return Err(format!("unknown tool '{name}'")),
+    };
     let result = runtime.run(plan).await.map_err(|error| error.to_string())?;
 
     Ok(json!({
@@ -400,6 +448,17 @@ fn tools_list_result() -> Value {
                 },
                 "required": ["plan"]
             }
+        }, {
+            "name": "run_compiled_tool_recipe",
+            "title": "Run compiled tool recipe",
+            "description": "Compile a high-level recipe into a Plan and execute it as one composite tool call.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "recipe": { "type": "object" }
+                },
+                "required": ["recipe"]
+            }
         }]
     })
 }
@@ -421,51 +480,4 @@ fn mcp_error(id: Value, code: i64, message: impl Into<String>) -> Value {
             "message": message.into()
         }
     })
-}
-
-struct LocalExecutor;
-
-#[async_trait]
-impl ToolExecutor for LocalExecutor {
-    async fn call(&self, tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
-        if let Some(ms) = input.get("sleep_ms").and_then(Value::as_u64) {
-            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-        }
-
-        local_output(tool, input)
-    }
-
-    async fn call_batch(
-        &self,
-        tool: &str,
-        inputs: Vec<BatchInput>,
-    ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
-        let max_sleep_ms = inputs
-            .iter()
-            .filter_map(|input| input.input.get("sleep_ms").and_then(Value::as_u64))
-            .max()
-            .unwrap_or(0);
-        if max_sleep_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(max_sleep_ms)).await;
-        }
-
-        inputs
-            .into_iter()
-            .map(|input| {
-                Ok(BatchOutput {
-                    node: input.node,
-                    output: local_output(tool, input.input)?,
-                })
-            })
-            .collect()
-    }
-}
-
-fn local_output(tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
-    match tool {
-        "const" => Ok(input.get("value").cloned().unwrap_or(input)),
-        "echo" | "write" => Ok(input),
-        "fail" => Err(ToolExecutionError::new("local fail tool was called")),
-        other => Ok(json!({ "tool": other, "input": input })),
-    }
 }
