@@ -8,9 +8,9 @@ provenance: observado
 evidence: C:\Users\lucas\dev\tool-call-compiler\.aerofortress\specs\tool-compiler.md
 decay: seasonal
 created: 2026-06-30T18:03:36.098827400+00:00
-updated: 2026-06-30T18:03:36.098827400+00:00
-validated: 2026-06-30T18:03:36.098827400+00:00
+updated: 2026-06-30T18:11:11.266575+00:00
+validated: 2026-06-30T18:11:11.266575+00:00
 links: 
 ---
 
-Spec inicial do tool-call-compiler: biblioteca standalone open source para compilar/otimizar tool calls de agentes. Define v0 com IR JSON explicito, modelo de efeitos para otimizacao segura, Rust core, SDK TypeScript, adapters, runtime por DAG e gates de 500 LOC produtivas + 95% cobertura.
+Spec inicial do tool-call-compiler: biblioteca standalone open source para compilar/otimizar tool calls de agentes. Define a operacao central como uma tool call composta entre dois turnos da LLM: LLM -> compiled tool graph -> compact result/trace -> LLM feedback. Tambem define v0 com IR JSON explicito, modelo de efeitos para otimizacao segura, Rust core, SDK TypeScript, adapters, runtime por DAG e gates de 500 LOC produtivas + 95% cobertura.

@@ -12,6 +12,12 @@ An explicit declarative description of tool nodes, dependencies, inputs, and req
 
 Avoid: "chain" when the structure can be a graph.
 
+## Compiled Tool Graph
+
+A validated and optimized plan executed as one composite tool call from the LLM's perspective. Internally it may run many operations; externally it returns one compact result/trace for the next LLM turn.
+
+Avoid: saying this eliminates the LLM.
+
 ## Effect
 
 A declared semantic property of a tool call that determines whether it is safe to reorder, retry, cache, deduplicate, batch, or run in parallel.
@@ -29,4 +35,3 @@ Avoid: putting adapter-specific behavior in the IR crate.
 The deterministic executor that schedules validated graph layers, resolves references, calls adapters, and records traces.
 
 Avoid: using "runtime" for the LLM planner.
-

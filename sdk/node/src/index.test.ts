@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { plan, pure, readOnly, ref, tc, valueRef } from "./index.js";
+import { plan, pure, readOnly, ref, tc, valueRef, type RunResult } from "./index.js";
 
 test("builds a stable plan json shape", () => {
   const built = plan()
@@ -31,3 +31,13 @@ test("tc namespace exposes the same builder helpers", () => {
   assert.equal(built.outputs.item, "item.output");
 });
 
+test("run result type matches composite tool feedback shape", () => {
+  const result: RunResult = {
+    outputs: { answer: "ok" },
+    node_outputs: { step: { answer: "ok" } },
+    trace: [{ node: "step", tool: "echo", status: "finished" }],
+    optimization: { deduplicated: [] },
+  };
+
+  assert.equal(result.outputs.answer, "ok");
+});

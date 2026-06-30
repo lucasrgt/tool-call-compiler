@@ -47,6 +47,30 @@ export interface Plan {
   outputs: Record<string, string>;
 }
 
+export interface DeduplicatedNode {
+  removed: string;
+  canonical: string;
+}
+
+export interface OptimizationReport {
+  deduplicated: DeduplicatedNode[];
+}
+
+export type TraceStatus = "started" | "finished" | { failed: string };
+
+export interface TraceEvent {
+  node: string;
+  tool: string;
+  status: TraceStatus;
+}
+
+export interface RunResult {
+  outputs: Record<string, Json>;
+  node_outputs: Record<string, Json>;
+  trace: TraceEvent[];
+  optimization: OptimizationReport;
+}
+
 export class PlanBuilder {
   private readonly value: Plan = {
     version: "0",

@@ -10,6 +10,24 @@ It takes a declared tool plan, validates it as a typed intermediate representati
 
 The core product is not an MCP batcher. MCP is one adapter. The library should also support REST, shell, browser, database, SDK-hosted functions, and future framework adapters.
 
+## Operational Definition
+
+The product is one composite tool call between two LLM turns:
+
+```text
+LLM -> compiled tool graph -> compact result/trace -> LLM feedback
+```
+
+It turns tool micro-orchestration like this:
+
+```text
+LLM -> tool -> LLM -> tool -> LLM
+```
+
+into a single tool call from the LLM's point of view when the segment can be expressed as a safe plan.
+
+The runtime still executes multiple internal operations. The compiler does not remove the LLM; it removes repeated LLM turns that only exist to drive deterministic tool orchestration.
+
 ## Product Thesis
 
 Agent systems are slow not only because model inference is slow, but because execution often degenerates into many small, serial, context-heavy tool calls.
@@ -57,4 +75,3 @@ The optimizer must refuse transformations when effects are missing or ambiguous.
 - Lines inside `#[cfg(test)] mod tests` do not count as production LOC.
 - Minimum line coverage: 95%.
 - Coverage command: `cargo llvm-cov --workspace --lib --tests --fail-under-lines 95`.
-

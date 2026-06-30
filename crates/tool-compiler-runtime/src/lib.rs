@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::task::JoinError;
@@ -88,7 +89,7 @@ impl Runtime {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunResult {
     pub outputs: BTreeMap<String, Value>,
     pub node_outputs: BTreeMap<NodeId, Value>,
@@ -96,7 +97,7 @@ pub struct RunResult {
     pub optimization: OptimizationReport,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceEvent {
     pub node: NodeId,
     pub tool: String,
@@ -129,7 +130,8 @@ impl TraceEvent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TraceStatus {
     Started,
     Finished,
@@ -321,6 +323,21 @@ mod tests {
         );
         assert_eq!(result.node_outputs.len(), 1);
         assert_eq!(result.optimization.deduplicated.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn serializes_run_result_as_composite_tool_feedback() {
+        let mut plan = plan();
+        plan.nodes
+            .push(Node::new("user", "const_user").with_input(json!({ "id": "u_1" })));
+        plan.outputs.insert("user".into(), ValueRef::output("user"));
+
+        let result = Runtime::new(TestExecutor).run(plan).await.unwrap();
+        let value = serde_json::to_value(&result).unwrap();
+
+        assert_eq!(value["outputs"]["user"]["id"], "u_1");
+        assert_eq!(value["trace"][0]["status"], "started");
+        assert!(value["optimization"]["deduplicated"].is_array());
     }
 
     #[tokio::test]

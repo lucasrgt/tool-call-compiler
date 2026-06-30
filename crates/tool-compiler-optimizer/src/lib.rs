@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tool_compiler_graph::{ExecutionGraph, GraphError, validate};
 use tool_compiler_ir::{Node, NodeId, Plan, REF_KEY, ValueRef};
@@ -25,12 +26,12 @@ impl OptimizedPlan {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OptimizationReport {
     pub deduplicated: Vec<DeduplicatedNode>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeduplicatedNode {
     pub removed: NodeId,
     pub canonical: NodeId,
