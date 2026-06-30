@@ -1,6 +1,6 @@
 {
   "name": "@tool-compiler/sdk-node",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript builder SDK for tool-compiler plans.",
   "repository": {
     "type": "git",

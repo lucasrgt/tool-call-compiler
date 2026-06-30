@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "tool-compiler-adapter-fs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "tool-compiler-adapter-http"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "tool-compiler-adapter-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "serde",
@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "tool-compiler-adapter-shell"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "tool-compiler-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "clap",
@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "tool-compiler-graph"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "tool-compiler-ir"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "tool-compiler-optimizer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "tool-compiler-planner"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -420,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "tool-compiler-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "serde",
@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "zmij"
