@@ -32,7 +32,15 @@ Good first flows:
 - Shell/filesystem verification: read many files, run checks, collect compact
   trace.
 
+Name recipes with `RecipePlan.name`. `recipe` is the execution shape; `name` is
+the human label the harness should show in transcripts, opportunity reports, and
+benchmark tables.
+
+Consecutive manual groups of 3+ compatible tool calls should be surfaced as
+compiler opportunities. They are the real-world "before" signal: convert them to
+`run_compiled_tool_recipe` when the calls are independent or can be expressed as
+a DAG.
+
 The host adapter should register precise capabilities for each harness tool:
 effects, cacheability, batchability, limits, and cost. Plans can then omit most
 metadata and let the runtime hydrate it from the registry.
-
