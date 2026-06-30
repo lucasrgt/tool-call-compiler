@@ -1,0 +1,14 @@
+[package]
+name = "tool-compiler-ir"
+description = "Stable intermediate representation for effect-aware agent tool plans."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+

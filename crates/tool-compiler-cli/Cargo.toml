@@ -1,0 +1,20 @@
+[package]
+name = "tool-compiler-cli"
+description = "Command line tools for validating and inspecting tool-compiler plans."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "tool-compiler"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde_json.workspace = true
+tool-compiler-graph.workspace = true
+tool-compiler-ir.workspace = true
+tool-compiler-optimizer.workspace = true
+

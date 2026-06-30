@@ -1,0 +1,12 @@
+[package]
+name = "tool-compiler-adapter-mcp"
+description = "MCP adapter contract helpers for tool-compiler."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+tool-compiler-ir.workspace = true
+

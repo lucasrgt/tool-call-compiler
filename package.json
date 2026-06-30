@@ -1,0 +1,13 @@
+{
+  "name": "tool-call-compiler-workspace",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "sdk/node"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @tool-compiler/sdk-node",
+    "test": "npm run test --workspace @tool-compiler/sdk-node"
+  }
+}
+

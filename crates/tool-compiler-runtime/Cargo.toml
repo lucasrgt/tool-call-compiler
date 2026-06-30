@@ -1,0 +1,21 @@
+[package]
+name = "tool-compiler-runtime"
+description = "Async runtime for optimized tool-compiler graphs."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tool-compiler-graph.workspace = true
+tool-compiler-ir.workspace = true
+tool-compiler-optimizer.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+

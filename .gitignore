@@ -1,0 +1,6 @@
+/target/
+/node_modules/
+/sdk/node/dist/
+/coverage/
+*.profraw
+*.profdata

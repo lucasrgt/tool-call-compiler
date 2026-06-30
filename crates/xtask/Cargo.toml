@@ -1,0 +1,13 @@
+[package]
+name = "xtask"
+description = "Repository quality gates for tool-compiler."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
