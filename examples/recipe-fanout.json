@@ -14,9 +14,12 @@
   "recipe": {
     "kind": "fan_out",
     "tool": "echo",
-    "items": ["README.md", "Cargo.toml", "package.json"],
-    "node_prefix": "file_",
-    "input_key": "path"
+    "items": [
+      { "sleep_ms": 50, "path": "README.md" },
+      { "sleep_ms": 50, "path": "Cargo.toml" },
+      { "sleep_ms": 50, "path": "package.json" }
+    ],
+    "node_prefix": "file_"
   },
   "outputs": {
     "first": "file_1.output"

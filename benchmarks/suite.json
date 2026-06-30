@@ -1,0 +1,58 @@
+{
+  "iterations": 3,
+  "out_dir": "reports/benchmarks",
+  "cases": [
+    {
+      "id": "sequential-ref-local",
+      "title": "Dependent reference chain",
+      "kind": "plan",
+      "plan": "examples/sequential-sleep-ref.json",
+      "description": "A dependency chain where compilation should preserve ordering instead of inventing speedup."
+    },
+    {
+      "id": "parallel-safe-local",
+      "title": "Independent pure calls",
+      "kind": "plan",
+      "plan": "examples/bench-sleep.json",
+      "description": "Independent pure nodes that can share one compiled call surface."
+    },
+    {
+      "id": "dedupe-local",
+      "title": "Pure duplicate calls",
+      "kind": "plan",
+      "plan": "examples/dedupe-sleep.json",
+      "description": "Identical pure calls deduplicated to one execution."
+    },
+    {
+      "id": "batch-10-sleep-local",
+      "title": "Ten batched sleeping calls",
+      "kind": "plan",
+      "plan": "examples/bench-compiled-tool-calls.json",
+      "description": "Hot-path benchmark that demonstrates call batching and LLM-turn collapse."
+    },
+    {
+      "id": "recipe-fanout-local",
+      "title": "Recipe fan-out",
+      "kind": "recipe",
+      "recipe": "examples/recipe-fanout.json",
+      "description": "High-level recipe expanded into independent nodes before benchmarking."
+    },
+    {
+      "id": "dogfood-knowledge-fanout",
+      "title": "AeroFortress knowledge fan-out shape",
+      "kind": "recipe",
+      "recipe": "examples/dogfood-aerofortress-knowledge.json",
+      "description": "Harness-shaped knowledge lookup fan-out kept deterministic through the local adapter."
+    },
+    {
+      "id": "mcp-filesystem-live",
+      "title": "Live MCP filesystem",
+      "kind": "plan",
+      "plan": "examples/mcp-filesystem-bench.json",
+      "runtime_config": "examples/runtime.config.example.json",
+      "iterations": 1,
+      "optional": true,
+      "description": "Launches a real MCP filesystem stdio server. Skipped unless --include-optional is passed."
+    }
+  ]
+}

@@ -58,6 +58,7 @@ cargo run -p tool-compiler-cli -- compile-recipe examples/recipe-fanout.json
 cargo run -p tool-compiler-cli -- run-recipe examples/recipe-fanout.json
 cargo run -p tool-compiler-cli -- explain examples/write-conflict.json
 cargo run -p tool-compiler-cli -- bench examples/bench-compiled-tool-calls.json --iterations 3
+npm run bench:suite
 cargo run -p tool-compiler-cli -- serve-mcp
 cargo run -p tool-compiler-cli -- run examples/fs-read.json --runtime-config examples/runtime.config.example.json
 cargo run -p tool-compiler-cli -- run examples/shell-rustc.json --runtime-config examples/runtime.config.example.json

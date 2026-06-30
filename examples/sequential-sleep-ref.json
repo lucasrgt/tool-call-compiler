@@ -1,0 +1,46 @@
+{
+  "version": "0",
+  "tools": {
+    "const": {
+      "adapter": "local",
+      "effects": {
+        "pure": true,
+        "idempotent": true,
+        "cacheable": false
+      }
+    },
+    "echo": {
+      "adapter": "local",
+      "effects": {
+        "pure": true,
+        "idempotent": true,
+        "cacheable": false
+      }
+    }
+  },
+  "nodes": [
+    {
+      "id": "user",
+      "tool": "const",
+      "input": {
+        "sleep_ms": 50,
+        "value": {
+          "id": "u_1"
+        }
+      }
+    },
+    {
+      "id": "message",
+      "tool": "echo",
+      "input": {
+        "sleep_ms": 50,
+        "user_id": {
+          "$ref": "user.output.id"
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "message": "message.output"
+  }
+}

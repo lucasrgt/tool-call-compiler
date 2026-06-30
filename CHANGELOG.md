@@ -4,6 +4,7 @@
 
 - Added GitHub CI for Rust gates, coverage, LOC, and TypeScript SDK tests.
 - Added release workflow for crate/npm packaging and guarded publishing.
+- Added declarative benchmark suite runner with JSON/Markdown reports and optional live MCP cases.
 - Added public Recipe JSON Schema, `fan_out` recipe, CLI compile/run commands, and TypeScript SDK recipe builder/compiler.
 - Added `run_compiled_tool_recipe` to the MCP server wrapper.
 - Added runtime config capability catalog support.
