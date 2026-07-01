@@ -6,9 +6,16 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
+keywords = ["agent", "tools", "compiler", "ir", "llm"]
+categories = ["data-structures", "development-tools"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-

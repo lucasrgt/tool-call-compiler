@@ -1,11 +1,19 @@
 [package]
 name = "tool-compiler-planner"
-description = "Intent-to-plan compiler for agent tool calls."
+description = "Intent-to-plan compiler and recipe expansion for agent tool calls."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
+keywords = ["agent", "tools", "compiler", "planner", "llm"]
+categories = ["development-tools"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true
 
 [dependencies]
 serde.workspace = true

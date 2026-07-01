@@ -11,7 +11,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tool_compiler_ir::{Effects, ToolSpec};
-use tool_compiler_runtime::{BatchInput, BatchOutput, ToolExecutionError, ToolExecutor};
+use tool_compiler_adapter_api::process::command_candidates;
+use tool_compiler_adapter_api::{BatchInput, BatchOutput, ToolExecutionError, ToolExecutor};
 
 pub const ADAPTER: &str = "mcp";
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -260,18 +261,6 @@ fn spawn_stdio(
     ))
 }
 
-fn command_candidates(command: &str) -> Vec<String> {
-    let mut candidates = vec![command.to_owned()];
-    #[cfg(windows)]
-    {
-        if !command.ends_with(".cmd") && !command.ends_with(".exe") {
-            candidates.push(format!("{command}.cmd"));
-            candidates.push(format!("{command}.exe"));
-        }
-    }
-    candidates
-}
-
 impl McpStdioClient {
     fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::SeqCst) + 1
@@ -505,15 +494,6 @@ mod tests {
         assert!(effects.batchable);
         assert!(effects.cacheable);
         assert!(effects.reads.contains("file:README.md"));
-    }
-
-    #[test]
-    fn command_candidates_include_windows_cmd_shim() {
-        let candidates = command_candidates("npx");
-
-        assert!(candidates.contains(&"npx".to_owned()));
-        #[cfg(windows)]
-        assert!(candidates.contains(&"npx.cmd".to_owned()));
     }
 
     #[test]

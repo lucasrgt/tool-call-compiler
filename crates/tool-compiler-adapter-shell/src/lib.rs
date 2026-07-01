@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::process::Command;
 use tool_compiler_ir::{Effects, ToolSpec};
-use tool_compiler_runtime::{ToolExecutionError, ToolExecutor};
+use tool_compiler_adapter_api::{ToolExecutionError, ToolExecutor};
 
 pub const ADAPTER: &str = "shell";
 

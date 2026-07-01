@@ -16,41 +16,10 @@ mod execution;
 mod refs;
 
 pub use conformance::{ConformanceCheck, ConformanceReport, check_adapter_conformance};
+pub use tool_compiler_adapter_api::{BatchInput, BatchOutput, ToolExecutionError, ToolExecutor};
 
 #[cfg(test)]
 use refs::resolve_input;
-
-#[async_trait]
-pub trait ToolExecutor: Send + Sync {
-    async fn call(&self, tool: &str, input: Value) -> Result<Value, ToolExecutionError>;
-
-    async fn call_batch(
-        &self,
-        tool: &str,
-        inputs: Vec<BatchInput>,
-    ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
-        let mut outputs = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            outputs.push(BatchOutput {
-                node: input.node,
-                output: self.call(tool, input.input).await?,
-            });
-        }
-        Ok(outputs)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct BatchInput {
-    pub node: NodeId,
-    pub input: Value,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct BatchOutput {
-    pub node: NodeId,
-    pub output: Value,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CacheKey {
@@ -254,20 +223,6 @@ pub enum TraceStatus {
     Finished,
     CacheHit,
     Failed(String),
-}
-
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-#[error("{message}")]
-pub struct ToolExecutionError {
-    pub message: String,
-}
-
-impl ToolExecutionError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
 }
 
 #[derive(Debug, Error)]

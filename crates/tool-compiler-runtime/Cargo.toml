@@ -6,16 +6,29 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
+keywords = ["agent", "tools", "compiler", "runtime", "llm"]
+categories = ["asynchronous", "development-tools"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true
 
 [dependencies]
 async-trait.workspace = true
+jsonschema.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tool-compiler-adapter-api.workspace = true
 tool-compiler-graph.workspace = true
 tool-compiler-ir.workspace = true
 tool-compiler-optimizer.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 tokio.workspace = true

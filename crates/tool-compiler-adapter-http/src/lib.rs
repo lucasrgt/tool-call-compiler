@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
 use tool_compiler_ir::{Effects, ToolSpec};
-use tool_compiler_runtime::{ToolExecutionError, ToolExecutor};
+use tool_compiler_adapter_api::{ToolExecutionError, ToolExecutor};
 
 pub const ADAPTER: &str = "http";
 

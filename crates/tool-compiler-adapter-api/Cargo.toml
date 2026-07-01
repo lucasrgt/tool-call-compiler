@@ -1,13 +1,13 @@
 [package]
-name = "tool-compiler-adapter-fs"
-description = "Filesystem adapter for tool-compiler."
+name = "tool-compiler-adapter-api"
+description = "Adapter contract for tool-compiler: the executor trait, batch types, and structured tool errors."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
-keywords = ["agent", "tools", "compiler", "adapter", "filesystem"]
-categories = ["asynchronous", "filesystem"]
+keywords = ["agent", "tools", "compiler", "adapter"]
+categories = ["asynchronous", "development-tools"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -17,12 +17,9 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
-globset.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs"] }
-tool-compiler-adapter-api.workspace = true
-tool-compiler-ir.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

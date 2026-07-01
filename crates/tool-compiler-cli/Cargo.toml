@@ -1,11 +1,19 @@
 [package]
 name = "tool-compiler-cli"
-description = "Command line tools for validating and inspecting tool-compiler plans."
+description = "Command line tools for validating, inspecting, and running tool-compiler plans."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
+keywords = ["agent", "tools", "compiler", "cli", "mcp"]
+categories = ["command-line-utilities", "development-tools"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "tool-compiler"
@@ -16,12 +24,17 @@ async-trait.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tool-compiler-adapter-fs = { version = "0.1.0", path = "../tool-compiler-adapter-fs" }
-tool-compiler-adapter-mcp = { version = "0.1.0", path = "../tool-compiler-adapter-mcp" }
-tool-compiler-adapter-shell = { version = "0.1.0", path = "../tool-compiler-adapter-shell" }
+tool-compiler-adapter-api.workspace = true
+tool-compiler-adapter-fs.workspace = true
+tool-compiler-adapter-http = { workspace = true, features = ["reqwest"] }
+tool-compiler-adapter-mcp.workspace = true
+tool-compiler-adapter-shell.workspace = true
 tool-compiler-graph.workspace = true
 tool-compiler-ir.workspace = true
 tool-compiler-optimizer.workspace = true
 tool-compiler-planner.workspace = true
 tool-compiler-runtime.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
 tokio.workspace = true

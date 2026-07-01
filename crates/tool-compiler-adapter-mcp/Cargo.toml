@@ -1,17 +1,30 @@
 [package]
 name = "tool-compiler-adapter-mcp"
-description = "MCP adapter contract helpers for tool-compiler."
+description = "MCP adapter for tool-compiler: stdio and HTTP transports, capability hydration."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
+keywords = ["agent", "tools", "compiler", "adapter", "mcp"]
+categories = ["asynchronous", "network-programming"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+http = ["dep:reqwest"]
+
+[lints]
+workspace = true
 
 [dependencies]
 async-trait.workspace = true
+reqwest = { workspace = true, optional = true, features = ["stream"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tool-compiler-adapter-api.workspace = true
 tool-compiler-ir.workspace = true
-tool-compiler-runtime.workspace = true

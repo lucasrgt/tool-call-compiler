@@ -1,18 +1,31 @@
 [package]
 name = "tool-compiler-adapter-http"
-description = "HTTP adapter contract helpers for tool-compiler."
+description = "HTTP adapter for tool-compiler with an injectable client and an optional reqwest implementation."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
+keywords = ["agent", "tools", "compiler", "adapter", "http"]
+categories = ["asynchronous", "web-programming::http-client"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+reqwest = ["dep:reqwest"]
+
+[lints]
+workspace = true
 
 [dependencies]
 async-trait.workspace = true
+reqwest = { workspace = true, optional = true }
 serde_json.workspace = true
 thiserror.workspace = true
+tool-compiler-adapter-api.workspace = true
 tool-compiler-ir.workspace = true
-tool-compiler-runtime.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
