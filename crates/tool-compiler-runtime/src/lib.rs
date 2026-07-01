@@ -1,953 +1,349 @@
-use std::collections::BTreeMap;
+//! Async runtime for optimized tool-compiler graphs.
+//!
+//! [`Runtime::run`] takes a [`Plan`], hydrates missing tool metadata from
+//! the [`ToolRegistry`], optimizes it, and executes the resulting graph with
+//! a dependency-driven scheduler: nodes start the moment their dependencies
+//! finish, effect safety is enforced by resource locks, per-tool and global
+//! concurrency limits apply, retries and timeouts follow declared policies,
+//! and `pure`/`cacheable` outputs are cached with write-aware invalidation.
+//!
+//! The composite [`RunResult`] is designed for LLM feedback: partial results
+//! survive failures (per-node `errors` and `skipped` maps), and
+//! [`ResultMode::Compact`] drops internal payloads for token-tight replies.
+
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::Mutex;
-use tokio::task::JoinError;
-use tool_compiler_graph::GraphError;
-use tool_compiler_ir::{Effects, Node, NodeId, ToolCost, ToolLimits, ToolSpec, ValueRef};
-use tool_compiler_optimizer::OptimizationReport;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio_util::sync::CancellationToken;
+use tool_compiler_graph::{ExecutionGraph, GraphError, validate};
+use tool_compiler_ir::{NodeId, Plan, ValueRef};
+use tool_compiler_optimizer::{OptimizationReport, OptimizedPlan, optimize};
 
+mod builtin;
+mod cache;
 mod conformance;
-mod execution;
+mod dispatch;
+mod locks;
+mod policy;
 mod refs;
+mod registry;
+mod result;
+mod scheduler;
 
-pub use conformance::{ConformanceCheck, ConformanceReport, check_adapter_conformance};
+pub use builtin::{BUILTIN_TOOLS, BuiltinExecutor};
+pub use cache::{CacheKey, MemoryCache, ToolCache};
+pub use conformance::{
+    ConformanceCheck, ConformanceOptions, ConformanceReport, check_adapter_conformance,
+    check_adapter_conformance_with,
+};
+pub use registry::{BUILTIN_ADAPTER, ToolCapabilities, ToolRegistry};
+pub use result::{
+    KeyRedactor, Redactor, ResultMode, RunMetrics, RunResult, RunStatus, SkipReason, TraceEvent,
+    TraceStatus,
+};
 pub use tool_compiler_adapter_api::{BatchInput, BatchOutput, ToolExecutionError, ToolExecutor};
 
-#[cfg(test)]
-use refs::resolve_input;
+use crate::policy::SingleFlight;
+use crate::scheduler::Engine;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct CacheKey {
-    pub adapter: String,
-    pub tool: String,
-    pub input: String,
+/// What to do when a node fails.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ErrorMode {
+    /// Stop scheduling new nodes, drain in-flight work, return partials.
+    #[default]
+    FailFast,
+    /// Keep executing nodes whose dependencies succeeded; only nodes that
+    /// (transitively) reference the failed output are skipped.
+    Continue,
 }
 
-#[async_trait]
-pub trait ToolCache: Send + Sync {
-    async fn get(&self, key: &CacheKey) -> Option<Value>;
-    async fn insert(&self, key: CacheKey, output: Value);
-    async fn clear(&self);
-}
-
+/// Per-run configuration.
 #[derive(Clone, Default)]
-pub struct MemoryCache {
-    inner: Arc<Mutex<BTreeMap<CacheKey, Value>>>,
+pub struct RunConfig {
+    /// Failure handling mode.
+    pub on_error: ErrorMode,
+    /// How much detail the result carries.
+    pub result_mode: ResultMode,
+    /// Whether the tool cache is consulted (defaults to `true` via
+    /// [`RunConfig::new`]; `Default::default()` also enables it).
+    pub use_cache: bool,
+    /// Global ceiling on concurrent dispatches (`None` = unbounded).
+    pub max_concurrency: Option<usize>,
+    /// Timeout applied to calls whose effects declare none.
+    pub default_timeout_ms: Option<u64>,
+    /// Per-output byte budget; larger outputs are replaced by a truncation
+    /// marker in the result (reference resolution always sees full values).
+    pub max_output_bytes: Option<usize>,
+    /// Cooperative cancellation: stops scheduling and drains in-flight work
+    /// (running calls are never aborted mid-effect).
+    pub cancel: Option<CancellationToken>,
+    /// Live trace event sink.
+    pub events: Option<UnboundedSender<TraceEvent>>,
+    /// Redacts node outputs before they leave the runtime.
+    pub redactor: Option<Arc<dyn Redactor>>,
 }
 
-#[async_trait]
-impl ToolCache for MemoryCache {
-    async fn get(&self, key: &CacheKey) -> Option<Value> {
-        self.inner.lock().await.get(key).cloned()
-    }
-
-    async fn insert(&self, key: CacheKey, output: Value) {
-        self.inner.lock().await.insert(key, output);
-    }
-
-    async fn clear(&self) {
-        self.inner.lock().await.clear();
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct ToolRegistry {
-    adapters: BTreeMap<String, Arc<dyn ToolExecutor>>,
-    capabilities: BTreeMap<String, ToolCapabilities>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct ToolCapabilities {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effects: Option<Effects>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limits: Option<ToolLimits>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost: Option<ToolCost>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_schema: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_schema: Option<Value>,
-}
-
-impl ToolCapabilities {
+impl RunConfig {
+    /// Default configuration: fail-fast, full result, cache enabled.
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_effects(mut self, effects: Effects) -> Self {
-        self.effects = Some(effects);
-        self
-    }
-
-    pub fn with_limits(mut self, limits: ToolLimits) -> Self {
-        self.limits = Some(limits);
-        self
-    }
-
-    pub fn with_cost(mut self, cost: ToolCost) -> Self {
-        self.cost = Some(cost);
-        self
-    }
-}
-
-impl ToolRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_adapter(
-        mut self,
-        adapter: impl Into<String>,
-        executor: impl ToolExecutor + 'static,
-    ) -> Self {
-        self.register_adapter(adapter, executor);
-        self
-    }
-
-    pub fn register_adapter(
-        &mut self,
-        adapter: impl Into<String>,
-        executor: impl ToolExecutor + 'static,
-    ) {
-        self.adapters.insert(adapter.into(), Arc::new(executor));
-    }
-
-    pub fn with_tool_capabilities(
-        mut self,
-        tool: impl Into<String>,
-        capabilities: ToolCapabilities,
-    ) -> Self {
-        self.register_tool_capabilities(tool, capabilities);
-        self
-    }
-
-    pub fn register_tool_capabilities(
-        &mut self,
-        tool: impl Into<String>,
-        capabilities: ToolCapabilities,
-    ) {
-        self.capabilities.insert(tool.into(), capabilities);
-    }
-
-    pub fn capabilities(&self, tool: &str) -> Option<&ToolCapabilities> {
-        self.capabilities.get(tool)
-    }
-
-    pub(crate) fn apply_capabilities(&self, plan: &mut tool_compiler_ir::Plan) {
-        for (tool, spec) in &mut plan.tools {
-            if let Some(capabilities) = self.capabilities.get(tool) {
-                merge_capabilities(spec, capabilities);
-            }
+        Self {
+            use_cache: true,
+            ..Self::default()
         }
     }
 
-    fn executor(&self, adapter: &str) -> Option<Arc<dyn ToolExecutor>> {
-        self.adapters.get(adapter).cloned()
+    /// Sets the failure handling mode.
+    pub fn with_on_error(mut self, mode: ErrorMode) -> Self {
+        self.on_error = mode;
+        self
+    }
+
+    /// Sets the result shaping mode.
+    pub fn with_result_mode(mut self, mode: ResultMode) -> Self {
+        self.result_mode = mode;
+        self
+    }
+
+    /// Enables or disables the tool cache for this run.
+    pub fn with_cache(mut self, use_cache: bool) -> Self {
+        self.use_cache = use_cache;
+        self
+    }
+
+    /// Sets the global concurrency ceiling.
+    pub fn with_max_concurrency(mut self, limit: usize) -> Self {
+        self.max_concurrency = Some(limit);
+        self
+    }
+
+    /// Sets the default timeout for tools that declare none.
+    pub fn with_default_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.default_timeout_ms = Some(timeout_ms);
+        self
+    }
+
+    /// Sets the per-output byte budget.
+    pub fn with_max_output_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_output_bytes = Some(max_bytes);
+        self
+    }
+
+    /// Attaches a cancellation token.
+    pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// Attaches a live trace event sink.
+    pub fn with_events(mut self, events: UnboundedSender<TraceEvent>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    /// Attaches an output redactor.
+    pub fn with_redactor(mut self, redactor: impl Redactor + 'static) -> Self {
+        self.redactor = Some(Arc::new(redactor));
+        self
     }
 }
 
-fn merge_capabilities(spec: &mut ToolSpec, capabilities: &ToolCapabilities) {
-    if spec.effects.is_none() {
-        spec.effects = capabilities.effects.clone();
-    }
-    if spec.limits.is_none() {
-        spec.limits = capabilities.limits.clone();
-    }
-    if spec.cost.is_none() {
-        spec.cost = capabilities.cost.clone();
-    }
-}
-
+/// The executor of compiled tool graphs.
 #[derive(Clone)]
 pub struct Runtime {
     registry: ToolRegistry,
     cache: Arc<dyn ToolCache>,
+    single_flight: Arc<SingleFlight>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RunResult {
-    pub outputs: BTreeMap<String, Value>,
-    pub node_outputs: BTreeMap<NodeId, Value>,
-    pub trace: Vec<TraceEvent>,
-    pub optimization: OptimizationReport,
+/// A plan compiled once and runnable many times (see [`Runtime::prepare`]).
+#[derive(Clone, Debug)]
+pub struct PreparedPlan {
+    plan: Plan,
+    graph: ExecutionGraph,
+    report: OptimizationReport,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TraceEvent {
-    pub node: NodeId,
-    pub tool: String,
-    pub status: TraceStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u128>,
-}
-
-impl TraceEvent {
-    fn started(node: &Node) -> Self {
-        Self {
-            node: node.id.clone(),
-            tool: node.tool.clone(),
-            status: TraceStatus::Started,
-            duration_ms: None,
-        }
+impl PreparedPlan {
+    /// The optimized plan.
+    pub fn plan(&self) -> &Plan {
+        &self.plan
     }
 
-    fn finished_with_status(node: &Node, status: TraceStatus, duration_ms: u128) -> Self {
-        Self {
-            node: node.id.clone(),
-            tool: node.tool.clone(),
-            status,
-            duration_ms: Some(duration_ms),
-        }
-    }
-
-    fn failed(node: &Node, error: &ToolExecutionError, duration_ms: u128) -> Self {
-        Self {
-            node: node.id.clone(),
-            tool: node.tool.clone(),
-            status: TraceStatus::Failed(error.message.clone()),
-            duration_ms: Some(duration_ms),
-        }
+    /// The optimization report.
+    pub fn report(&self) -> &OptimizationReport {
+        &self.report
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TraceStatus {
-    Started,
-    Finished,
-    CacheHit,
-    Failed(String),
+impl Runtime {
+    /// Runtime with exactly one adapter registered under `adapter`.
+    pub fn single_adapter(
+        adapter: impl Into<String>,
+        executor: impl ToolExecutor + 'static,
+    ) -> Self {
+        Self::from_registry(ToolRegistry::new().with_adapter(adapter, executor))
+    }
+
+    /// Runtime over a registry with the default in-memory cache.
+    pub fn from_registry(registry: ToolRegistry) -> Self {
+        Self::with_cache(registry, MemoryCache::default())
+    }
+
+    /// Runtime over a registry with a custom cache backend.
+    pub fn with_cache(registry: ToolRegistry, cache: impl ToolCache + 'static) -> Self {
+        Self {
+            registry,
+            cache: Arc::new(cache),
+            single_flight: Arc::new(SingleFlight::default()),
+        }
+    }
+
+    /// The adapter/capability registry.
+    pub fn registry(&self) -> &ToolRegistry {
+        &self.registry
+    }
+
+    pub(crate) fn cache(&self) -> &Arc<dyn ToolCache> {
+        &self.cache
+    }
+
+    pub(crate) fn single_flight(&self) -> &Arc<SingleFlight> {
+        &self.single_flight
+    }
+
+    /// Drops every cached tool output.
+    pub async fn clear_cache(&self) {
+        self.cache.clear().await;
+    }
+
+    /// Hydrates and optimizes `plan` once; the result can be executed many
+    /// times with [`Runtime::run_prepared`] without re-optimizing.
+    pub fn prepare(&self, mut plan: Plan) -> Result<PreparedPlan, RuntimeError> {
+        self.registry.apply_capabilities(&mut plan);
+        let optimized: OptimizedPlan = optimize(plan)?;
+        Ok(PreparedPlan {
+            plan: optimized.plan().clone(),
+            graph: optimized.graph().clone(),
+            report: optimized.report().clone(),
+        })
+    }
+
+    /// Optimizes and executes `plan` with the default [`RunConfig`].
+    pub async fn run(&self, plan: Plan) -> Result<RunResult, RuntimeError> {
+        self.run_with(plan, RunConfig::new()).await
+    }
+
+    /// Optimizes and executes `plan` with an explicit configuration.
+    pub async fn run_with(&self, plan: Plan, config: RunConfig) -> Result<RunResult, RuntimeError> {
+        let prepared = self.prepare(plan)?;
+        self.run_prepared_with(&prepared, config).await
+    }
+
+    /// Executes an already prepared plan with the default configuration.
+    pub async fn run_prepared(&self, prepared: &PreparedPlan) -> Result<RunResult, RuntimeError> {
+        self.run_prepared_with(prepared, RunConfig::new()).await
+    }
+
+    /// Executes an already prepared plan with an explicit configuration.
+    pub async fn run_prepared_with(
+        &self,
+        prepared: &PreparedPlan,
+        config: RunConfig,
+    ) -> Result<RunResult, RuntimeError> {
+        Engine::new(
+            self,
+            prepared.plan.clone(),
+            &prepared.graph,
+            prepared.report.clone(),
+            config,
+            false,
+        )?
+        .run()
+        .await
+    }
+
+    /// Validates and executes `plan` with dependency-driven parallelism but
+    /// no optimizer passes (no dedup, no elimination, no batching).
+    pub async fn run_unoptimized(
+        &self,
+        mut plan: Plan,
+        config: RunConfig,
+    ) -> Result<RunResult, RuntimeError> {
+        self.registry.apply_capabilities(&mut plan);
+        let graph = validate(&plan)?;
+        Engine::new(self, plan, &graph, OptimizationReport::default(), config, false)?
+            .run()
+            .await
+    }
+
+    /// Executes `plan` one dispatch at a time in graph order — the serial
+    /// baseline used by benchmarks. No optimizer passes apply.
+    pub async fn run_serial(&self, plan: Plan) -> Result<RunResult, RuntimeError> {
+        self.run_serial_with(plan, RunConfig::new()).await
+    }
+
+    /// Serial baseline with an explicit configuration (benchmarks pass
+    /// `use_cache: false` so the baseline mirrors a cacheless serial agent).
+    pub async fn run_serial_with(
+        &self,
+        mut plan: Plan,
+        config: RunConfig,
+    ) -> Result<RunResult, RuntimeError> {
+        self.registry.apply_capabilities(&mut plan);
+        let graph = validate(&plan)?;
+        Engine::new(self, plan, &graph, OptimizationReport::default(), config, true)?
+            .run()
+            .await
+    }
 }
 
+/// Infrastructure-level failures.
+///
+/// Tool-level failures do not surface here: they land inside
+/// [`RunResult::errors`] so partial results survive. `RuntimeError` is for
+/// problems that make the run impossible or meaningless as a whole.
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    /// The plan failed validation.
     #[error(transparent)]
     Graph(#[from] GraphError),
-    #[error("node '{node}' failed: {error}")]
-    Tool {
-        node: NodeId,
-        error: ToolExecutionError,
-    },
-    #[error("join error: {0}")]
-    Join(JoinError),
-    #[error("batch call did not return output for node '{node}'")]
-    BatchMissingOutput { node: NodeId },
+    /// A plan tool names an adapter with no registered executor.
     #[error("no executor registered for adapter '{adapter}'")]
-    MissingAdapter { adapter: String },
+    MissingAdapter {
+        /// The missing adapter name.
+        adapter: String,
+    },
+    /// A registered input schema is itself invalid.
+    #[error("input schema for tool '{tool}' is invalid: {message}")]
+    InvalidInputSchema {
+        /// Tool whose schema failed to compile.
+        tool: String,
+        /// Compiler error detail.
+        message: String,
+    },
+    /// A reference names a node with no recorded output.
     #[error("node '{0}' has no output yet")]
     MissingNodeOutput(NodeId),
+    /// A reference path does not exist in the referenced output.
     #[error("reference '{reference}' missing path segment '{segment}'")]
     MissingPath {
+        /// The reference being resolved.
         reference: ValueRef,
+        /// The missing segment.
         segment: String,
     },
+    /// A reference string failed to parse at runtime.
     #[error("invalid reference: {0}")]
     InvalidRef(String),
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use async_trait::async_trait;
-    use serde_json::json;
-    use tool_compiler_ir::{Effects, Node, Plan, ToolLimits, ToolSpec};
-
-    use super::*;
-
-    struct TestExecutor;
-
-    #[async_trait]
-    impl ToolExecutor for TestExecutor {
-        async fn call(&self, tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
-            match tool {
-                "const_user" => Ok(json!({ "id": input["id"], "name": "Ada" })),
-                "echo" => Ok(input),
-                "fail" => Err(ToolExecutionError::new("planned failure")),
-                other => Err(ToolExecutionError::new(format!("unknown tool {other}"))),
-            }
-        }
-    }
-
-    struct BatchExecutor {
-        calls: Arc<AtomicUsize>,
-        batches: Arc<AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl ToolExecutor for BatchExecutor {
-        async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(input)
-        }
-
-        async fn call_batch(
-            &self,
-            _tool: &str,
-            inputs: Vec<BatchInput>,
-        ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
-            self.batches.fetch_add(1, Ordering::SeqCst);
-            Ok(inputs
-                .into_iter()
-                .map(|input| BatchOutput {
-                    node: input.node,
-                    output: input.input,
-                })
-                .collect())
-        }
-    }
-
-    struct CountingExecutor {
-        calls: Arc<AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl ToolExecutor for CountingExecutor {
-        async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(input)
-        }
-    }
-
-    struct FailingBatchExecutor;
-
-    #[async_trait]
-    impl ToolExecutor for FailingBatchExecutor {
-        async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
-            Ok(input)
-        }
-
-        async fn call_batch(
-            &self,
-            _tool: &str,
-            _inputs: Vec<BatchInput>,
-        ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
-            Err(ToolExecutionError::new("batch failed"))
-        }
-    }
-
-    struct MissingBatchOutputExecutor;
-
-    #[async_trait]
-    impl ToolExecutor for MissingBatchOutputExecutor {
-        async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
-            Ok(input)
-        }
-
-        async fn call_batch(
-            &self,
-            _tool: &str,
-            _inputs: Vec<BatchInput>,
-        ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
-            Ok(Vec::new())
-        }
-    }
-
-    struct WrongExecutor;
-
-    #[async_trait]
-    impl ToolExecutor for WrongExecutor {
-        async fn call(&self, _tool: &str, _input: Value) -> Result<Value, ToolExecutionError> {
-            Ok(json!({ "wrong": true }))
-        }
-    }
-
-    struct ErrorExecutor;
-
-    #[async_trait]
-    impl ToolExecutor for ErrorExecutor {
-        async fn call(&self, _tool: &str, _input: Value) -> Result<Value, ToolExecutionError> {
-            Err(ToolExecutionError::new("always fails"))
-        }
-    }
-
-    struct ConcurrentExecutor {
-        active: Arc<AtomicUsize>,
-        max_active: Arc<AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl ToolExecutor for ConcurrentExecutor {
-        async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
-            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-            self.max_active.fetch_max(active, Ordering::SeqCst);
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            self.active.fetch_sub(1, Ordering::SeqCst);
-            Ok(input)
-        }
-    }
-
-    #[derive(Default)]
-    struct CountingCache {
-        gets: Arc<AtomicUsize>,
-        inserts: Arc<AtomicUsize>,
-        inner: MemoryCache,
-    }
-
-    #[async_trait]
-    impl ToolCache for CountingCache {
-        async fn get(&self, key: &CacheKey) -> Option<Value> {
-            self.gets.fetch_add(1, Ordering::SeqCst);
-            self.inner.get(key).await
-        }
-
-        async fn insert(&self, key: CacheKey, output: Value) {
-            self.inserts.fetch_add(1, Ordering::SeqCst);
-            self.inner.insert(key, output).await;
-        }
-
-        async fn clear(&self) {
-            self.inner.clear().await;
-        }
-    }
-
-    fn plan() -> Plan {
-        let mut plan = Plan::new();
-        plan.tools.insert(
-            "const_user".into(),
-            ToolSpec::new("test").with_effects(Effects::pure()),
-        );
-        plan.tools.insert(
-            "echo".into(),
-            ToolSpec::new("test").with_effects(Effects::pure()),
-        );
-        plan.tools.insert(
-            "fail".into(),
-            ToolSpec::new("test").with_effects(Effects::pure()),
-        );
-        plan
-    }
-
-    #[tokio::test]
-    async fn executes_layers_and_resolves_outputs() {
-        let mut plan = plan();
-        plan.nodes
-            .push(Node::new("user", "const_user").with_input(json!({ "id": "u_1" })));
-        plan.nodes
-            .push(Node::new("message", "echo").with_input(json!({
-                "user_id": { "$ref": "user.output.id" }
-            })));
-        plan.outputs
-            .insert("message".into(), ValueRef::output("message"));
-
-        let result = Runtime::new(TestExecutor).run(plan).await.unwrap();
-
-        assert_eq!(result.outputs["message"], json!({ "user_id": "u_1" }));
-        assert_eq!(result.trace.len(), 4);
-    }
-
-    #[tokio::test]
-    async fn deduplicates_before_execution() {
-        let mut plan = plan();
-        plan.nodes
-            .push(Node::new("a", "const_user").with_input(json!({ "id": "u_1" })));
-        plan.nodes
-            .push(Node::new("b", "const_user").with_input(json!({ "id": "u_1" })));
-        plan.outputs.insert("user".into(), ValueRef::output("b"));
-
-        let result = Runtime::new(TestExecutor).run(plan).await.unwrap();
-
-        assert_eq!(
-            result.outputs["user"],
-            json!({ "id": "u_1", "name": "Ada" })
-        );
-        assert_eq!(result.node_outputs.len(), 1);
-        assert_eq!(result.optimization.deduplicated.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn serial_baseline_does_not_deduplicate() {
-        let mut plan = plan();
-        plan.nodes
-            .push(Node::new("a", "const_user").with_input(json!({ "id": "u_1" })));
-        plan.nodes
-            .push(Node::new("b", "const_user").with_input(json!({ "id": "u_1" })));
-        plan.outputs.insert("user".into(), ValueRef::output("b"));
-
-        let result = Runtime::new(TestExecutor).run_serial(plan).await.unwrap();
-
-        assert_eq!(result.node_outputs.len(), 2);
-        assert!(result.optimization.deduplicated.is_empty());
-    }
-
-    #[tokio::test]
-    async fn batch_groups_use_batch_executor_contract() {
-        let mut plan = Plan::new();
-        plan.tools.insert(
-            "echo".into(),
-            ToolSpec::new("test").with_effects(Effects {
-                batchable: true,
-                ..Effects::pure()
-            }),
-        );
-        plan.nodes
-            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
-        plan.nodes
-            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
-        plan.outputs.insert("a".into(), ValueRef::output("a"));
-        plan.outputs.insert("b".into(), ValueRef::output("b"));
-        let calls = Arc::new(AtomicUsize::new(0));
-        let batches = Arc::new(AtomicUsize::new(0));
-
-        let result = Runtime::new(BatchExecutor {
-            calls: calls.clone(),
-            batches: batches.clone(),
-        })
-        .run(plan)
-        .await
-        .unwrap();
-
-        assert_eq!(result.outputs["a"], json!({ "id": "a" }));
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert_eq!(batches.load(Ordering::SeqCst), 1);
-        assert_eq!(result.optimization.batch_groups.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn batch_size_limit_splits_optimizer_groups() {
-        let mut plan = Plan::new();
-        plan.tools.insert(
-            "echo".into(),
-            ToolSpec::new("test")
-                .with_effects(Effects {
-                    batchable: true,
-                    ..Effects::pure()
-                })
-                .with_limits(ToolLimits {
-                    batch_size: Some(2),
-                    max_concurrency: None,
-                }),
-        );
-        for id in ["a", "b", "c", "d"] {
-            plan.nodes
-                .push(Node::new(id, "echo").with_input(json!({ "id": id })));
-        }
-        let calls = Arc::new(AtomicUsize::new(0));
-        let batches = Arc::new(AtomicUsize::new(0));
-
-        Runtime::new(BatchExecutor {
-            calls,
-            batches: batches.clone(),
-        })
-        .run(plan)
-        .await
-        .unwrap();
-
-        assert_eq!(batches.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn max_concurrency_limit_throttles_layer_execution() {
-        let mut plan = Plan::new();
-        plan.tools.insert(
-            "echo".into(),
-            ToolSpec::new("test")
-                .with_effects(Effects::read_only(["api:item"]))
-                .with_limits(ToolLimits {
-                    max_concurrency: Some(1),
-                    batch_size: None,
-                }),
-        );
-        plan.nodes
-            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
-        plan.nodes
-            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
-        let max_active = Arc::new(AtomicUsize::new(0));
-
-        Runtime::new(ConcurrentExecutor {
-            active: Arc::new(AtomicUsize::new(0)),
-            max_active: max_active.clone(),
-        })
-        .run(plan)
-        .await
-        .unwrap();
-
-        assert_eq!(max_active.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn cache_survives_between_runtime_runs() {
-        let mut plan = plan();
-        plan.nodes
-            .push(Node::new("message", "echo").with_input(json!({ "ok": true })));
-        plan.outputs
-            .insert("message".into(), ValueRef::output("message"));
-        let calls = Arc::new(AtomicUsize::new(0));
-        let runtime = Runtime::new(CountingExecutor {
-            calls: calls.clone(),
-        });
-
-        runtime.run(plan.clone()).await.unwrap();
-        let second = runtime.run(plan).await.unwrap();
-
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(
-            second
-                .trace
-                .iter()
-                .any(|event| event.status == TraceStatus::CacheHit)
-        );
-    }
-
-    #[tokio::test]
-    async fn clear_cache_removes_cached_outputs() {
-        let mut plan = plan();
-        plan.nodes
-            .push(Node::new("message", "echo").with_input(json!({ "ok": true })));
-        plan.outputs
-            .insert("message".into(), ValueRef::output("message"));
-        let calls = Arc::new(AtomicUsize::new(0));
-        let runtime = Runtime::new(CountingExecutor {
-            calls: calls.clone(),
-        });
-
-        runtime.run(plan.clone()).await.unwrap();
-        runtime.clear_cache().await;
-        runtime.run(plan).await.unwrap();
-
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn runtime_accepts_custom_cache_backend() {
-        let mut plan = plan();
-        plan.nodes
-            .push(Node::new("message", "echo").with_input(json!({ "ok": true })));
-        let gets = Arc::new(AtomicUsize::new(0));
-        let inserts = Arc::new(AtomicUsize::new(0));
-        let cache = CountingCache {
-            gets: gets.clone(),
-            inserts: inserts.clone(),
-            inner: MemoryCache::default(),
-        };
-        let runtime = Runtime::with_cache(
-            ToolRegistry::new().with_adapter("test", TestExecutor),
-            cache,
-        );
-
-        runtime.run(plan).await.unwrap();
-
-        assert_eq!(gets.load(Ordering::SeqCst), 1);
-        assert_eq!(inserts.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn cached_batch_group_returns_without_calling_executor_again() {
-        let mut plan = Plan::new();
-        plan.tools.insert(
-            "echo".into(),
-            ToolSpec::new("test").with_effects(Effects {
-                batchable: true,
-                ..Effects::pure()
-            }),
-        );
-        plan.nodes
-            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
-        plan.nodes
-            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
-        plan.outputs.insert("a".into(), ValueRef::output("a"));
-        let calls = Arc::new(AtomicUsize::new(0));
-        let batches = Arc::new(AtomicUsize::new(0));
-        let runtime = Runtime::new(BatchExecutor {
-            calls,
-            batches: batches.clone(),
-        });
-
-        runtime.run(plan.clone()).await.unwrap();
-        let second = runtime.run(plan).await.unwrap();
-
-        assert_eq!(batches.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            second
-                .trace
-                .iter()
-                .filter(|event| event.status == TraceStatus::CacheHit)
-                .count(),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn reports_missing_adapter_for_batch_group() {
-        let mut plan = Plan::new();
-        plan.tools.insert(
-            "echo".into(),
-            ToolSpec::new("missing").with_effects(Effects {
-                batchable: true,
-                ..Effects::pure()
-            }),
-        );
-        plan.nodes
-            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
-        plan.nodes
-            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
-
-        let error = Runtime::from_registry(ToolRegistry::new())
-            .run(plan)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, RuntimeError::MissingAdapter { .. }));
-    }
-
-    #[tokio::test]
-    async fn reports_batch_executor_errors() {
-        let mut plan = Plan::new();
-        plan.tools.insert(
-            "echo".into(),
-            ToolSpec::new("test").with_effects(Effects {
-                batchable: true,
-                ..Effects::pure()
-            }),
-        );
-        plan.nodes
-            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
-        plan.nodes
-            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
-
-        let error = Runtime::new(FailingBatchExecutor)
-            .run(plan)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, RuntimeError::Tool { .. }));
-    }
-
-    #[tokio::test]
-    async fn reports_missing_batch_outputs() {
-        let mut plan = Plan::new();
-        plan.tools.insert(
-            "echo".into(),
-            ToolSpec::new("test").with_effects(Effects {
-                batchable: true,
-                ..Effects::pure()
-            }),
-        );
-        plan.nodes
-            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
-        plan.nodes
-            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
-
-        let error = Runtime::new(MissingBatchOutputExecutor)
-            .run(plan)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, RuntimeError::BatchMissingOutput { .. }));
-    }
-
-    #[tokio::test]
-    async fn non_cacheable_tools_execute_every_time() {
-        let mut plan = Plan::new();
-        plan.tools.insert(
-            "write".into(),
-            ToolSpec::new("test").with_effects(Effects {
-                writes: ["db:item"].into_iter().map(String::from).collect(),
-                ..Effects::default()
-            }),
-        );
-        plan.nodes.push(Node::new("write", "write"));
-        let calls = Arc::new(AtomicUsize::new(0));
-        let runtime = Runtime::new(CountingExecutor {
-            calls: calls.clone(),
-        });
-
-        runtime.run(plan.clone()).await.unwrap();
-        runtime.run(plan).await.unwrap();
-
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn registry_routes_by_adapter() {
-        let mut plan = plan();
-        plan.tools.insert(
-            "echo".into(),
-            ToolSpec::new("custom").with_effects(Effects::pure()),
-        );
-        plan.nodes
-            .push(Node::new("message", "echo").with_input(json!({ "ok": true })));
-        plan.outputs
-            .insert("message".into(), ValueRef::output("message"));
-        let registry = ToolRegistry::new().with_adapter("custom", TestExecutor);
-
-        let result = Runtime::from_registry(registry).run(plan).await.unwrap();
-
-        assert_eq!(result.outputs["message"], json!({ "ok": true }));
-    }
-
-    #[tokio::test]
-    async fn registry_capabilities_hydrate_plan_tools() {
-        let mut plan = Plan::new();
-        plan.tools.insert("echo".into(), ToolSpec::new("custom"));
-        plan.nodes
-            .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
-        plan.nodes
-            .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
-        let registry = ToolRegistry::new()
-            .with_adapter(
-                "custom",
-                BatchExecutor {
-                    calls: Arc::new(AtomicUsize::new(0)),
-                    batches: Arc::new(AtomicUsize::new(0)),
-                },
-            )
-            .with_tool_capabilities(
-                "echo",
-                ToolCapabilities::new().with_effects(Effects {
-                    batchable: true,
-                    ..Effects::pure()
-                }),
-            );
-
-        let result = Runtime::from_registry(registry).run(plan).await.unwrap();
-
-        assert_eq!(result.optimization.batch_groups.len(), 1);
-        assert_eq!(result.optimization.summary.estimated_tool_calls_after, 1);
-    }
-
-    #[tokio::test]
-    async fn reports_missing_adapter() {
-        let mut plan = plan();
-        plan.tools.insert(
-            "echo".into(),
-            ToolSpec::new("missing").with_effects(Effects::pure()),
-        );
-        plan.nodes.push(Node::new("message", "echo"));
-
-        let error = Runtime::from_registry(ToolRegistry::new())
-            .run(plan)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, RuntimeError::MissingAdapter { .. }));
-    }
-
-    #[tokio::test]
-    async fn serializes_run_result_as_composite_tool_feedback() {
-        let mut plan = plan();
-        plan.nodes
-            .push(Node::new("user", "const_user").with_input(json!({ "id": "u_1" })));
-        plan.outputs.insert("user".into(), ValueRef::output("user"));
-
-        let result = Runtime::new(TestExecutor).run(plan).await.unwrap();
-        let value = serde_json::to_value(&result).unwrap();
-
-        assert_eq!(value["outputs"]["user"]["id"], "u_1");
-        assert_eq!(value["trace"][0]["status"], "started");
-        assert!(value["trace"][1]["duration_ms"].is_number());
-        assert!(value["optimization"]["deduplicated"].is_array());
-    }
-
-    #[tokio::test]
-    async fn stops_on_tool_error() {
-        let mut plan = plan();
-        plan.nodes.push(Node::new("bad", "fail"));
-
-        let error = Runtime::new(TestExecutor).run(plan).await.unwrap_err();
-
-        assert!(matches!(error, RuntimeError::Tool { .. }));
-    }
-
-    #[tokio::test]
-    async fn resolves_array_path_segments() {
-        let mut plan = plan();
-        plan.nodes
-            .push(Node::new("items", "echo").with_input(json!({
-                "values": [{ "id": "first" }, { "id": "second" }]
-            })));
-        plan.nodes.push(Node::new("pick", "echo").with_input(json!({
-            "id": { "$ref": "items.output.values.1.id" }
-        })));
-        plan.outputs.insert("pick".into(), ValueRef::output("pick"));
-
-        let result = Runtime::new(TestExecutor).run(plan).await.unwrap();
-
-        assert_eq!(result.outputs["pick"], json!({ "id": "second" }));
-    }
-
-    #[tokio::test]
-    async fn reports_missing_reference_paths() {
-        let mut plan = plan();
-        plan.nodes
-            .push(Node::new("user", "const_user").with_input(json!({ "id": "u_1" })));
-        plan.nodes.push(Node::new("bad", "echo").with_input(json!({
-            "missing": { "$ref": "user.output.profile.name" }
-        })));
-
-        let error = Runtime::new(TestExecutor).run(plan).await.unwrap_err();
-
-        assert!(matches!(error, RuntimeError::MissingPath { .. }));
-    }
-
-    #[tokio::test]
-    async fn reports_invalid_runtime_refs() {
-        let error =
-            resolve_input(&json!({ "$ref": "not-a-runtime-ref" }), &BTreeMap::new()).unwrap_err();
-
-        assert!(matches!(error, RuntimeError::InvalidRef(_)));
-    }
-
-    #[tokio::test]
-    async fn reports_invalid_array_path_segment() {
-        let mut outputs = BTreeMap::new();
-        outputs.insert("items".to_owned(), json!(["a"]));
-        let error = resolve_input(&json!({ "$ref": "items.output.nope" }), &outputs).unwrap_err();
-
-        assert!(matches!(error, RuntimeError::MissingPath { .. }));
-    }
-
-    #[tokio::test]
-    async fn reports_out_of_bounds_array_path_segment() {
-        let mut outputs = BTreeMap::new();
-        outputs.insert("items".to_owned(), json!(["a"]));
-        let error = resolve_input(&json!({ "$ref": "items.output.9" }), &outputs).unwrap_err();
-
-        assert!(matches!(error, RuntimeError::MissingPath { .. }));
-    }
-
-    #[tokio::test]
-    async fn reports_scalar_path_segment() {
-        let mut outputs = BTreeMap::new();
-        outputs.insert("value".to_owned(), json!("text"));
-        let error = resolve_input(&json!({ "$ref": "value.output.name" }), &outputs).unwrap_err();
-
-        assert!(matches!(error, RuntimeError::MissingPath { .. }));
-    }
-
-    #[tokio::test]
-    async fn conformance_suite_reports_adapter_checks() {
-        let report = check_adapter_conformance("test", TestExecutor).await;
-
-        assert!(report.passed);
-        assert_eq!(report.checks.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn conformance_suite_reports_wrong_outputs() {
-        let report = check_adapter_conformance("test", WrongExecutor).await;
-
-        assert!(!report.passed);
-        assert!(report.checks.iter().any(|check| !check.passed));
-    }
-
-    #[tokio::test]
-    async fn conformance_suite_reports_executor_errors() {
-        let report = check_adapter_conformance("test", ErrorExecutor).await;
-
-        assert!(!report.passed);
-        assert!(
-            report
-                .checks
-                .iter()
-                .any(|check| check.message.contains("always fails"))
-        );
-    }
+/// Convenience: resolves one reference against a set of node outputs.
+/// Exposed for hosts that post-process [`RunResult::node_outputs`].
+pub fn resolve_output_ref(
+    value_ref: &ValueRef,
+    node_outputs: &std::collections::BTreeMap<NodeId, Value>,
+) -> Result<Value, RuntimeError> {
+    refs::resolve_value_ref(value_ref, node_outputs)
 }
