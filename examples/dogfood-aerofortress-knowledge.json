@@ -21,12 +21,12 @@
     "kind": "fan_out",
     "tool": "knowledge_lookup",
     "items": [
-      { "q": "tool compiler" },
-      { "q": "codegraph" },
-      { "q": "aerofortress harness integration" }
+      "tool compiler",
+      "codegraph",
+      "aerofortress harness integration"
     ],
     "node_prefix": "lookup_",
-    "input_key": "query"
+    "input_key": "q"
   },
   "outputs": {
     "tool_compiler": "lookup_1.output",

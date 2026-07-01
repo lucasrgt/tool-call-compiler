@@ -1,31 +1,68 @@
+//! Intent-to-plan compiler and recipe expansion for agent tool calls.
+//!
+//! Two higher-level inputs lower into the executable [`Plan`] IR:
+//!
+//! - **Intent plans** ([`IntentPlan`]): agent-authored steps whose
+//!   dependencies are derived from `$ref`s plus explicit `after` ordering.
+//! - **Recipes** ([`RecipePlan`]): compact declarative shapes (`fan_out`,
+//!   `map_reduce`, `pipeline`) that expand into many nodes, optionally
+//!   parameterized with `{"$param": "name"}` placeholders.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use thiserror::Error;
 use tool_compiler_ir::{
     CURRENT_VERSION, Node, NodeId, Plan, ToolName, ToolSpec, ValueRef, collect_refs,
+    validate_node_id,
 };
 
+mod mining;
+mod recipes;
+
+pub use mining::{ObservedCall, Suggestion, SuggestionKind, suggest_recipes};
+pub use recipes::{
+    FanOutRecipe, MapReduceRecipe, PipelineRecipe, PipelineStep, Recipe, RecipePlan,
+    compile_recipe, compile_recipe_with_params,
+};
+
+/// A higher-level agent-authored description of desired steps.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IntentPlan {
+    /// Intent IR version; must equal [`CURRENT_VERSION`].
     pub version: String,
+    /// Optional human label carried into the compiled plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Tools referenced by steps.
     #[serde(default)]
     pub tools: BTreeMap<ToolName, ToolSpec>,
+    /// Ordered steps; dependencies derive from refs plus `after`.
     #[serde(default)]
     pub steps: Vec<IntentStep>,
+    /// Named outputs of the compiled plan.
     #[serde(default)]
     pub outputs: BTreeMap<String, ValueRef>,
 }
 
 impl IntentPlan {
+    /// Creates an empty intent at [`CURRENT_VERSION`].
     pub fn new() -> Self {
         Self {
             version: CURRENT_VERSION.to_owned(),
+            name: None,
             tools: BTreeMap::new(),
             steps: Vec::new(),
             outputs: BTreeMap::new(),
         }
+    }
+
+    /// Sets the human-readable name.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 }
 
@@ -35,83 +72,24 @@ impl Default for IntentPlan {
     }
 }
 
+/// One intent step.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IntentStep {
+    /// Step id (becomes the node id).
     pub id: NodeId,
+    /// Tool the step calls.
     pub tool: ToolName,
+    /// JSON input; may contain `$ref`s.
     #[serde(default)]
     pub input: Value,
-    #[serde(default)]
+    /// Explicit ordering dependencies in addition to derived refs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<NodeId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RecipePlan {
-    pub version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub tools: BTreeMap<ToolName, ToolSpec>,
-    pub recipe: Recipe,
-    #[serde(default)]
-    pub outputs: BTreeMap<String, ValueRef>,
-}
-
-impl RecipePlan {
-    pub fn new(recipe: Recipe) -> Self {
-        Self {
-            version: CURRENT_VERSION.to_owned(),
-            name: None,
-            tools: BTreeMap::new(),
-            recipe,
-            outputs: BTreeMap::new(),
-        }
-    }
-
-    pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.name = Some(name.into());
-        self
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Recipe {
-    FanOut(FanOutRecipe),
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FanOutRecipe {
-    pub tool: ToolName,
-    pub items: Vec<Value>,
-    #[serde(default = "default_node_prefix")]
-    pub node_prefix: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_key: Option<String>,
-}
-
-impl FanOutRecipe {
-    pub fn new(tool: impl Into<ToolName>, items: impl IntoIterator<Item = Value>) -> Self {
-        Self {
-            tool: tool.into(),
-            items: items.into_iter().collect(),
-            node_prefix: default_node_prefix(),
-            input_key: None,
-        }
-    }
-
-    pub fn with_node_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.node_prefix = prefix.into();
-        self
-    }
-
-    pub fn with_input_key(mut self, key: impl Into<String>) -> Self {
-        self.input_key = Some(key.into());
-        self
-    }
-}
-
 impl IntentStep {
+    /// Creates a step calling `tool` with an empty object input.
     pub fn new(id: impl Into<NodeId>, tool: impl Into<ToolName>) -> Self {
         Self {
             id: id.into(),
@@ -121,58 +99,94 @@ impl IntentStep {
         }
     }
 
+    /// Sets the step input.
     pub fn with_input(mut self, input: Value) -> Self {
         self.input = input;
         self
     }
 
+    /// Adds explicit ordering dependencies.
     pub fn after(mut self, dependencies: impl IntoIterator<Item = impl Into<NodeId>>) -> Self {
         self.after = dependencies.into_iter().map(Into::into).collect();
         self
     }
 }
 
+/// Errors produced while lowering intents and recipes.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PlannerError {
+    /// Unsupported IR version.
     #[error("unsupported intent version '{0}'")]
     UnsupportedVersion(String),
-    #[error(transparent)]
-    InvalidRef(#[from] tool_compiler_ir::RefParseError),
+    /// Two steps share an id.
+    #[error("duplicate step id '{0}'")]
+    DuplicateStep(NodeId),
+    /// A step id fails node-id validation.
+    #[error("step '{step}' has an invalid id: {message}")]
+    InvalidStepId {
+        /// Offending step id.
+        step: NodeId,
+        /// Validation failure detail.
+        message: String,
+    },
+    /// A step names a tool the intent does not declare.
+    #[error("step '{step}' uses unknown tool '{tool}'")]
+    UnknownTool {
+        /// Offending step id.
+        step: NodeId,
+        /// Missing tool name.
+        tool: ToolName,
+    },
+    /// A step references itself.
+    #[error("step '{0}' references itself")]
+    SelfReference(NodeId),
+    /// A step input carries a malformed reference.
+    #[error("invalid reference in step '{step}': {message}")]
+    InvalidRef {
+        /// Offending step id.
+        step: NodeId,
+        /// Parse failure detail.
+        message: String,
+    },
+    /// A fan-out recipe has neither items nor an items_ref.
+    #[error("fan_out recipe needs a non-empty 'items' array or an 'items_ref'")]
+    EmptyFanOut,
+    /// A pipeline recipe has no steps.
+    #[error("pipeline recipe needs at least one step")]
+    EmptyPipeline,
+    /// A `$param` placeholder names an undeclared parameter.
+    #[error("recipe references undeclared parameter '{0}'")]
+    UnknownParam(String),
+    /// A required parameter (declared with a null default) was not supplied.
+    #[error("recipe parameter '{0}' is required but was not supplied")]
+    MissingParam(String),
 }
 
-pub fn compile_recipe(recipe_plan: RecipePlan) -> Result<Plan, PlannerError> {
-    if recipe_plan.version != CURRENT_VERSION {
-        return Err(PlannerError::UnsupportedVersion(recipe_plan.version));
-    }
-
-    let mut plan = Plan::new();
-    plan.tools = recipe_plan.tools;
-    plan.outputs = recipe_plan.outputs;
-    match recipe_plan.recipe {
-        Recipe::FanOut(recipe) => {
-            plan.nodes = recipe
-                .items
-                .into_iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    Node::new(
-                        format!("{}{}", recipe.node_prefix, index + 1),
-                        recipe.tool.clone(),
-                    )
-                    .with_input(recipe_input(recipe.input_key.as_deref(), item))
-                })
-                .collect();
-        }
-    }
-    Ok(plan)
-}
-
+/// Compiles an intent into an executable plan.
 pub fn compile_intent(intent: IntentPlan) -> Result<Plan, PlannerError> {
     if intent.version != CURRENT_VERSION {
         return Err(PlannerError::UnsupportedVersion(intent.version));
     }
 
+    let mut seen = BTreeSet::new();
+    for step in &intent.steps {
+        validate_node_id(&step.id).map_err(|error| PlannerError::InvalidStepId {
+            step: step.id.clone(),
+            message: error.to_string(),
+        })?;
+        if !seen.insert(step.id.clone()) {
+            return Err(PlannerError::DuplicateStep(step.id.clone()));
+        }
+        if !intent.tools.contains_key(&step.tool) {
+            return Err(PlannerError::UnknownTool {
+                step: step.id.clone(),
+                tool: step.tool.clone(),
+            });
+        }
+    }
+
     let mut plan = Plan::new();
+    plan.name = intent.name;
     plan.tools = intent.tools;
     plan.outputs = intent.outputs;
     plan.nodes = intent
@@ -184,22 +198,22 @@ pub fn compile_intent(intent: IntentPlan) -> Result<Plan, PlannerError> {
     Ok(plan)
 }
 
-fn default_node_prefix() -> String {
-    "item_".into()
-}
-
-fn recipe_input(input_key: Option<&str>, item: Value) -> Value {
-    let Some(key) = input_key else {
-        return item;
-    };
-    let mut value = Map::new();
-    value.insert(key.to_owned(), item);
-    Value::Object(value)
-}
-
 fn compile_step(step: IntentStep) -> Result<Node, PlannerError> {
-    let mut depends_on = step.after.into_iter().collect::<BTreeSet<_>>();
-    for value_ref in collect_refs(&step.input)? {
+    let mut depends_on = BTreeSet::new();
+    for dependency in step.after {
+        if dependency == step.id {
+            return Err(PlannerError::SelfReference(step.id));
+        }
+        depends_on.insert(dependency);
+    }
+    let refs = collect_refs(&step.input).map_err(|error| PlannerError::InvalidRef {
+        step: step.id.clone(),
+        message: error.to_string(),
+    })?;
+    for value_ref in refs {
+        if value_ref.node() == step.id {
+            return Err(PlannerError::SelfReference(step.id));
+        }
         depends_on.insert(value_ref.node().to_owned());
     }
 
@@ -216,17 +230,22 @@ fn compile_step(step: IntentStep) -> Result<Node, PlannerError> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tool_compiler_ir::{Effects, ToolSpec};
+    use tool_compiler_ir::Effects;
 
     use super::*;
 
+    fn tools() -> BTreeMap<ToolName, ToolSpec> {
+        [(
+            "echo".to_owned(),
+            ToolSpec::new("test").with_effects(Effects::pure()),
+        )]
+        .into()
+    }
+
     #[test]
     fn compiles_intent_refs_into_dependencies() {
-        let mut intent = IntentPlan::new();
-        intent.tools.insert(
-            "echo".into(),
-            ToolSpec::new("test").with_effects(Effects::pure()),
-        );
+        let mut intent = IntentPlan::new().with_name("lookup");
+        intent.tools = tools();
         intent
             .steps
             .push(IntentStep::new("user", "echo").with_input(json!({ "id": "u_1" })));
@@ -237,12 +256,16 @@ mod tests {
 
         let plan = compile_intent(intent).unwrap();
 
+        assert_eq!(plan.name.as_deref(), Some("lookup"));
         assert_eq!(plan.nodes[1].depends_on, vec!["user"]);
     }
 
     #[test]
     fn merges_explicit_and_ref_dependencies() {
         let mut intent = IntentPlan::new();
+        intent.tools = tools();
+        intent.steps.push(IntentStep::new("audit", "echo"));
+        intent.steps.push(IntentStep::new("user", "echo"));
         intent.steps.push(
             IntentStep::new("summary", "echo")
                 .with_input(json!({ "user": { "$ref": "user.output" } }))
@@ -251,7 +274,7 @@ mod tests {
 
         let plan = compile_intent(intent).unwrap();
 
-        assert_eq!(plan.nodes[0].depends_on, vec!["audit", "user"]);
+        assert_eq!(plan.nodes[2].depends_on, vec!["audit", "user"]);
     }
 
     #[test]
@@ -266,38 +289,57 @@ mod tests {
     }
 
     #[test]
-    fn compiles_fan_out_recipe() {
-        let mut recipe = RecipePlan::new(Recipe::FanOut(
-            FanOutRecipe::new("echo", [json!("a"), json!("b")])
-                .with_node_prefix("read_")
-                .with_input_key("path"),
-        ))
-        .with_name("read docs");
-        recipe.tools.insert(
-            "echo".into(),
-            ToolSpec::new("test").with_effects(Effects::pure()),
+    fn rejects_duplicate_steps_with_context() {
+        let mut intent = IntentPlan::new();
+        intent.tools = tools();
+        intent.steps.push(IntentStep::new("same", "echo"));
+        intent.steps.push(IntentStep::new("same", "echo"));
+
+        assert_eq!(
+            compile_intent(intent).unwrap_err(),
+            PlannerError::DuplicateStep("same".into())
         );
-        recipe
-            .outputs
-            .insert("first".into(), ValueRef::output("read_1"));
-
-        let plan = compile_recipe(recipe).unwrap();
-
-        assert_eq!(plan.nodes.len(), 2);
-        assert_eq!(plan.nodes[0].id, "read_1");
-        assert_eq!(plan.nodes[0].input, json!({ "path": "a" }));
-        assert_eq!(plan.outputs["first"], ValueRef::output("read_1"));
     }
 
     #[test]
-    fn recipe_name_is_metadata_only() {
-        let recipe = RecipePlan::new(Recipe::FanOut(FanOutRecipe::new("echo", [json!("a")])))
-            .with_name("lookup docs");
+    fn rejects_unknown_tools_with_step_context() {
+        let mut intent = IntentPlan::new();
+        intent.steps.push(IntentStep::new("a", "missing"));
 
-        let value = serde_json::to_value(&recipe).unwrap();
-        let plan = compile_recipe(recipe).unwrap();
+        assert_eq!(
+            compile_intent(intent).unwrap_err(),
+            PlannerError::UnknownTool {
+                step: "a".into(),
+                tool: "missing".into()
+            }
+        );
+    }
 
-        assert_eq!(value["name"], "lookup docs");
-        assert_eq!(plan.nodes.len(), 1);
+    #[test]
+    fn rejects_self_references() {
+        let mut intent = IntentPlan::new();
+        intent.tools = tools();
+        intent
+            .steps
+            .push(IntentStep::new("loop", "echo").with_input(json!({
+                "value": { "$ref": "loop.output" }
+            })));
+
+        assert_eq!(
+            compile_intent(intent).unwrap_err(),
+            PlannerError::SelfReference("loop".into())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_step_ids() {
+        let mut intent = IntentPlan::new();
+        intent.tools = tools();
+        intent.steps.push(IntentStep::new("a.b", "echo"));
+
+        assert!(matches!(
+            compile_intent(intent).unwrap_err(),
+            PlannerError::InvalidStepId { .. }
+        ));
     }
 }
