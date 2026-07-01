@@ -1,6 +1,8 @@
 /target/
 /node_modules/
 /sdk/node/dist/
+/sdk/node/dist-test/
+/sdk/node/src/schemas.gen.ts
 /coverage/
 /reports/
 *.profraw

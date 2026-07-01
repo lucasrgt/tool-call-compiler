@@ -1,0 +1,39 @@
+{
+  "name": "recipe-pipeline",
+  "recipe": {
+    "version": "0",
+    "tools": {
+      "echo": { "adapter": "local" }
+    },
+    "recipe": {
+      "kind": "pipeline",
+      "node_prefix": "step_",
+      "steps": [
+        { "tool": "echo", "input": { "q": "start" } },
+        {
+          "tool": "echo",
+          "input": { "from": { "$prev": "q" }, "all": { "$prev": "" } }
+        }
+      ]
+    },
+    "outputs": { "last": "step_2.output" }
+  },
+  "plan": {
+    "version": "0",
+    "tools": {
+      "echo": { "adapter": "local" }
+    },
+    "nodes": [
+      { "id": "step_1", "tool": "echo", "input": { "q": "start" } },
+      {
+        "id": "step_2",
+        "tool": "echo",
+        "input": {
+          "from": { "$ref": "step_1.output.q" },
+          "all": { "$ref": "step_1.output" }
+        }
+      }
+    ],
+    "outputs": { "last": "step_2.output" }
+  }
+}

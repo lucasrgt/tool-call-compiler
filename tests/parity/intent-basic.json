@@ -1,0 +1,61 @@
+{
+  "name": "intent-basic",
+  "intent": {
+    "version": "0",
+    "name": "lookup docs",
+    "tools": {
+      "echo": {
+        "adapter": "local",
+        "effects": {
+          "pure": true,
+          "reads": [],
+          "writes": [],
+          "idempotent": true,
+          "cacheable": true,
+          "batchable": false,
+          "commutative": true
+        }
+      }
+    },
+    "steps": [
+      { "id": "audit", "tool": "echo", "input": {} },
+      { "id": "user", "tool": "echo", "input": { "id": "u_1" } },
+      {
+        "id": "profile",
+        "tool": "echo",
+        "input": { "user": { "$ref": "user.output.id" } },
+        "after": ["audit"]
+      }
+    ],
+    "outputs": { "profile": "profile.output" }
+  },
+  "plan": {
+    "version": "0",
+    "name": "lookup docs",
+    "tools": {
+      "echo": {
+        "adapter": "local",
+        "effects": {
+          "pure": true,
+          "reads": [],
+          "writes": [],
+          "idempotent": true,
+          "cacheable": true,
+          "batchable": false,
+          "commutative": true
+        }
+      }
+    },
+    "nodes": [
+      { "id": "audit", "tool": "echo", "input": {} },
+      { "id": "user", "tool": "echo", "input": { "id": "u_1" } },
+      {
+        "id": "profile",
+        "tool": "echo",
+        "input": { "user": { "$ref": "user.output.id" } },
+        "depends_on": ["audit", "user"]
+      }
+    ],
+    "outputs": { "profile": "profile.output" }
+  }
+}

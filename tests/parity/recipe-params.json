@@ -1,0 +1,29 @@
+{
+  "name": "recipe-params",
+  "recipe": {
+    "version": "0",
+    "params": { "query": null, "prefix": "q_" },
+    "tools": {
+      "search": { "adapter": "local" }
+    },
+    "recipe": {
+      "kind": "fan_out",
+      "tool": "search",
+      "items": [{ "$param": "query" }],
+      "node_prefix": "q_",
+      "input_key": "q"
+    },
+    "outputs": {}
+  },
+  "params": { "query": "hello world" },
+  "plan": {
+    "version": "0",
+    "tools": {
+      "search": { "adapter": "local" }
+    },
+    "nodes": [
+      { "id": "q_1", "tool": "search", "input": { "q": "hello world" } }
+    ],
+    "outputs": {}
+  }
+}

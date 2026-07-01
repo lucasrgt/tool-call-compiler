@@ -1,0 +1,63 @@
+{
+  "name": "recipe-map-reduce-dynamic",
+  "recipe": {
+    "version": "0",
+    "tools": {
+      "fetch": {
+        "adapter": "http",
+        "effects": {
+          "pure": false,
+          "reads": ["api:docs"],
+          "writes": [],
+          "idempotent": true,
+          "cacheable": true,
+          "batchable": false,
+          "commutative": false
+        }
+      },
+      "summarize": { "adapter": "builtin" }
+    },
+    "recipe": {
+      "kind": "map_reduce",
+      "tool": "fetch",
+      "items_ref": "search.output.hits",
+      "node_prefix": "doc_",
+      "input_key": "doc",
+      "reduce_tool": "summarize",
+      "reduce_input_key": "documents"
+    },
+    "outputs": {}
+  },
+  "plan": {
+    "version": "0",
+    "tools": {
+      "fetch": {
+        "adapter": "http",
+        "effects": {
+          "pure": false,
+          "reads": ["api:docs"],
+          "writes": [],
+          "idempotent": true,
+          "cacheable": true,
+          "batchable": false,
+          "commutative": false
+        }
+      },
+      "summarize": { "adapter": "builtin" }
+    },
+    "nodes": [
+      {
+        "id": "doc_each",
+        "tool": "fetch",
+        "input": { "doc": { "$item": "" } },
+        "for_each": "search.output.hits"
+      },
+      {
+        "id": "doc_reduce",
+        "tool": "summarize",
+        "input": { "documents": { "$ref": "doc_each.output" } }
+      }
+    ],
+    "outputs": {}
+  }
+}

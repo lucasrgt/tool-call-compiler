@@ -7,27 +7,158 @@
   "additionalProperties": false,
   "properties": {
     "version": { "const": "0" },
+    "name": { "type": "string", "minLength": 1 },
+    "params": {
+      "type": "object",
+      "description": "Declared parameters with defaults; a null default marks the parameter as required. {\"$param\": \"name\"} placeholders inside the recipe are substituted at compile time.",
+      "additionalProperties": true
+    },
     "tools": {
       "type": "object",
-      "additionalProperties": { "$ref": "plan.schema.json#/$defs/toolSpec" }
+      "additionalProperties": { "$ref": "#/$defs/toolSpec" }
     },
     "recipe": { "$ref": "#/$defs/recipe" },
-    "outputs": { "type": "object", "additionalProperties": { "type": "string" } }
+    "outputs": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/valueRef" }
+    }
   },
   "$defs": {
+    "valueRef": {
+      "type": "string",
+      "pattern": "^[^.]+\\.output(\\.[^.]+)*$"
+    },
+    "toolSpec": {
+      "type": "object",
+      "required": ["adapter"],
+      "additionalProperties": false,
+      "properties": {
+        "adapter": { "type": "string", "minLength": 1 },
+        "effects": { "$ref": "#/$defs/effects" },
+        "limits": { "$ref": "#/$defs/limits" },
+        "cost": { "$ref": "#/$defs/cost" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "effects": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pure": { "type": "boolean" },
+        "reads": { "type": "array", "items": { "type": "string" } },
+        "writes": { "type": "array", "items": { "type": "string" } },
+        "idempotent": { "type": "boolean" },
+        "cacheable": { "type": "boolean" },
+        "batchable": { "type": "boolean" },
+        "commutative": { "type": "boolean" },
+        "timeout_ms": { "type": "integer", "minimum": 1 },
+        "retry": { "$ref": "#/$defs/retry" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "pure": { "const": true } },
+            "required": ["pure"]
+          },
+          "then": {
+            "properties": { "writes": { "maxItems": 0 } }
+          }
+        }
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_concurrency": { "type": "integer", "minimum": 1 },
+        "batch_size": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fixed_ms": { "type": "integer", "minimum": 0 },
+        "per_call_ms": { "type": "integer", "minimum": 0 },
+        "tokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "retry": {
+      "type": "object",
+      "required": ["max_attempts"],
+      "additionalProperties": false,
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 255 },
+        "retryable_errors": { "type": "array", "items": { "type": "string" } },
+        "backoff_ms": { "type": "integer", "minimum": 1 }
+      }
+    },
     "recipe": {
-      "oneOf": [{ "$ref": "#/$defs/fanOut" }]
+      "oneOf": [
+        { "$ref": "#/$defs/fanOut" },
+        { "$ref": "#/$defs/mapReduce" },
+        { "$ref": "#/$defs/pipeline" }
+      ]
+    },
+    "itemsConstraint": {
+      "anyOf": [
+        {
+          "required": ["items"],
+          "properties": { "items": { "type": "array", "minItems": 1 } }
+        },
+        { "required": ["items_ref"] }
+      ]
     },
     "fanOut": {
       "type": "object",
-      "required": ["kind", "tool", "items"],
+      "required": ["kind", "tool"],
       "additionalProperties": false,
+      "allOf": [{ "$ref": "#/$defs/itemsConstraint" }],
       "properties": {
         "kind": { "const": "fan_out" },
         "tool": { "type": "string", "minLength": 1 },
         "items": { "type": "array", "items": true },
+        "items_ref": { "$ref": "#/$defs/valueRef" },
         "node_prefix": { "type": "string", "minLength": 1 },
         "input_key": { "type": "string", "minLength": 1 }
+      }
+    },
+    "mapReduce": {
+      "type": "object",
+      "required": ["kind", "tool", "reduce_tool"],
+      "additionalProperties": false,
+      "allOf": [{ "$ref": "#/$defs/itemsConstraint" }],
+      "properties": {
+        "kind": { "const": "map_reduce" },
+        "tool": { "type": "string", "minLength": 1 },
+        "items": { "type": "array", "items": true },
+        "items_ref": { "$ref": "#/$defs/valueRef" },
+        "node_prefix": { "type": "string", "minLength": 1 },
+        "input_key": { "type": "string", "minLength": 1 },
+        "reduce_tool": { "type": "string", "minLength": 1 },
+        "reduce_input_key": { "type": "string", "minLength": 1 }
+      }
+    },
+    "pipeline": {
+      "type": "object",
+      "required": ["kind", "steps"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "pipeline" },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["tool"],
+            "additionalProperties": false,
+            "properties": {
+              "tool": { "type": "string", "minLength": 1 },
+              "input": true
+            }
+          }
+        },
+        "node_prefix": { "type": "string", "minLength": 1 }
       }
     }
   }

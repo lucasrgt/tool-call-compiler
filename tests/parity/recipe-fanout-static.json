@@ -1,0 +1,52 @@
+{
+  "name": "recipe-fanout-static",
+  "recipe": {
+    "version": "0",
+    "name": "read docs",
+    "tools": {
+      "read": {
+        "adapter": "fs.repo",
+        "effects": {
+          "pure": false,
+          "reads": ["file:{path}"],
+          "writes": [],
+          "idempotent": true,
+          "cacheable": true,
+          "batchable": true,
+          "commutative": false
+        }
+      }
+    },
+    "recipe": {
+      "kind": "fan_out",
+      "tool": "read",
+      "items": ["a.md", "b.md"],
+      "node_prefix": "read_",
+      "input_key": "path"
+    },
+    "outputs": { "first": "read_1.output" }
+  },
+  "plan": {
+    "version": "0",
+    "name": "read docs",
+    "tools": {
+      "read": {
+        "adapter": "fs.repo",
+        "effects": {
+          "pure": false,
+          "reads": ["file:{path}"],
+          "writes": [],
+          "idempotent": true,
+          "cacheable": true,
+          "batchable": true,
+          "commutative": false
+        }
+      }
+    },
+    "nodes": [
+      { "id": "read_1", "tool": "read", "input": { "path": "a.md" } },
+      { "id": "read_2", "tool": "read", "input": { "path": "b.md" } }
+    ],
+    "outputs": { "first": "read_1.output" }
+  }
+}

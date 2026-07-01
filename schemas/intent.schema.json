@@ -7,29 +7,101 @@
   "additionalProperties": false,
   "properties": {
     "version": { "const": "0" },
+    "name": { "type": "string", "minLength": 1 },
     "tools": {
       "type": "object",
-      "additionalProperties": { "$ref": "plan.schema.json#/$defs/toolSpec" }
+      "additionalProperties": { "$ref": "#/$defs/toolSpec" }
     },
-    "steps": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/step" }
-    },
+    "steps": { "type": "array", "items": { "$ref": "#/$defs/step" } },
     "outputs": {
       "type": "object",
-      "additionalProperties": { "type": "string" }
+      "additionalProperties": { "$ref": "#/$defs/valueRef" }
     }
   },
   "$defs": {
+    "valueRef": {
+      "type": "string",
+      "pattern": "^[^.]+\\.output(\\.[^.]+)*$"
+    },
+    "nodeId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^.]+$"
+    },
+    "toolSpec": {
+      "type": "object",
+      "required": ["adapter"],
+      "additionalProperties": false,
+      "properties": {
+        "adapter": { "type": "string", "minLength": 1 },
+        "effects": { "$ref": "#/$defs/effects" },
+        "limits": { "$ref": "#/$defs/limits" },
+        "cost": { "$ref": "#/$defs/cost" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "effects": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pure": { "type": "boolean" },
+        "reads": { "type": "array", "items": { "type": "string" } },
+        "writes": { "type": "array", "items": { "type": "string" } },
+        "idempotent": { "type": "boolean" },
+        "cacheable": { "type": "boolean" },
+        "batchable": { "type": "boolean" },
+        "commutative": { "type": "boolean" },
+        "timeout_ms": { "type": "integer", "minimum": 1 },
+        "retry": { "$ref": "#/$defs/retry" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "pure": { "const": true } },
+            "required": ["pure"]
+          },
+          "then": {
+            "properties": { "writes": { "maxItems": 0 } }
+          }
+        }
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_concurrency": { "type": "integer", "minimum": 1 },
+        "batch_size": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fixed_ms": { "type": "integer", "minimum": 0 },
+        "per_call_ms": { "type": "integer", "minimum": 0 },
+        "tokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "retry": {
+      "type": "object",
+      "required": ["max_attempts"],
+      "additionalProperties": false,
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 255 },
+        "retryable_errors": { "type": "array", "items": { "type": "string" } },
+        "backoff_ms": { "type": "integer", "minimum": 1 }
+      }
+    },
     "step": {
       "type": "object",
       "required": ["id", "tool"],
       "additionalProperties": false,
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
+        "id": { "$ref": "#/$defs/nodeId" },
         "tool": { "type": "string", "minLength": 1 },
         "input": true,
-        "after": { "type": "array", "items": { "type": "string" } }
+        "after": { "type": "array", "items": { "$ref": "#/$defs/nodeId" } }
       }
     }
   }

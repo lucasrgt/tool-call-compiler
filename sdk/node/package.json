@@ -1,7 +1,7 @@
 {
   "name": "@tool-compiler/sdk-node",
   "version": "0.2.0",
-  "description": "TypeScript builder SDK for tool-compiler plans.",
+  "description": "TypeScript builder SDK for tool-compiler plans, intents, and recipes.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lucasrgt/tool-call-compiler.git",
@@ -9,23 +9,30 @@
   },
   "license": "MIT OR Apache-2.0",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist/cjs/index.js"
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test dist/index.test.js"
+    "generate": "node scripts/generate-schemas.mjs",
+    "build": "npm run generate && tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node scripts/write-cjs-package.mjs",
+    "test": "npm run generate && tsc -p tsconfig.test.json && node --test dist-test/index.test.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.7",
+    "ajv": "^8.17.1",
     "typescript": "^5.8.3"
   }
 }

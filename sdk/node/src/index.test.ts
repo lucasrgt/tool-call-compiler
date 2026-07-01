@@ -1,26 +1,45 @@
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+import Ajv2020 from "ajv/dist/2020.js";
 
 import {
-  capabilities,
-  compileRecipe,
-  compileIntent,
-  cost,
-  fanOut,
-  intent,
-  plan,
+  INTENT_SCHEMA,
   PLAN_SCHEMA,
+  RECIPE_SCHEMA,
+  collectRefNodes,
+  compileIntent,
+  compileRecipe,
+  compileRecipeWithParams,
+  fanOutRef,
+  intent,
+  literal,
+  plan,
   pure,
   readOnly,
   ref,
   tc,
   valueRef,
+  write,
   type ConformanceReport,
+  type Json,
+  type Plan,
   type RunResult,
 } from "./index.js";
 
+const here = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(here, "..", "..", "..");
+
+function ajv() {
+  return new Ajv2020.default({ strict: false, allowUnionTypes: true });
+}
+
 test("builds a stable plan json shape", () => {
   const built = plan()
+    .name("compose message")
     .tool("fetchUser", readOnly("http", ["api:user"]))
     .tool("format", pure("local"))
     .node("user", "fetchUser", { id: "u_1" })
@@ -29,92 +48,175 @@ test("builds a stable plan json shape", () => {
     .toJSON();
 
   assert.equal(built.version, "0");
+  assert.equal(built.name, "compose message");
   assert.deepEqual(built.nodes[1]?.input, {
     user: { $ref: "user.output.id" },
   });
   assert.equal(built.outputs.message, "message.output");
 });
 
-test("tc namespace exposes the same builder helpers", () => {
-  const built = tc
-    .plan()
-    .tool("fetch", tc.effects.readOnly("http", ["api:item"]))
-    .node("item", "fetch")
-    .output("item", tc.valueRef("item"))
-    .toJSON();
-
-  assert.equal(built.tools.fetch.adapter, "http");
-  assert.equal(built.outputs.item, "item.output");
-});
-
-test("tool limits can be layered onto specs", () => {
+test("built plans validate against the plan schema", () => {
+  const validate = ajv().compile(PLAN_SCHEMA as unknown as object);
   const built = plan()
-    .tool("fetch", tc.limits(pure("http"), { batch_size: 10, max_concurrency: 2 }))
-    .node("a", "fetch")
+    .tool("read", readOnly("fs", ["file:{path}"]))
+    .node("a", "read", { path: "x.md" })
+    .node("gate", "read", { path: "flag.md" })
+    .node(
+      "guarded",
+      "read",
+      { path: "y.md" },
+      { when: { ref: valueRef("gate"), equals: true } },
+    )
+    .node(
+      "each",
+      "read",
+      { path: { $item: "path" } as unknown as Json },
+      { forEach: valueRef("a", ["entries"]) },
+    )
+    .output("all", valueRef("each"))
     .toJSON();
 
-  assert.equal(built.tools.fetch.limits?.batch_size, 10);
-  assert.equal(PLAN_SCHEMA.properties.version.const, "0");
+  assert.equal(validate(built), true, JSON.stringify(validate.errors));
 });
 
-test("tool cost can be layered onto specs", () => {
-  const spec = cost(pure("local"), { fixed_ms: 50, tokens: 80 });
-
-  assert.equal(spec.cost?.fixed_ms, 50);
-  assert.equal(spec.cost?.tokens, 80);
+test("schema constants match the /schemas source files", () => {
+  for (const [constant, file] of [
+    [PLAN_SCHEMA, "plan.schema.json"],
+    [INTENT_SCHEMA, "intent.schema.json"],
+    [RECIPE_SCHEMA, "recipe.schema.json"],
+  ] as const) {
+    const source = JSON.parse(
+      readFileSync(path.join(repoRoot, "schemas", file), "utf8"),
+    );
+    assert.deepEqual(structuredClone(constant), source, `${file} drifted`);
+  }
 });
 
-test("capabilities clone adapter metadata", () => {
-  const caps = capabilities({
-    effects: { batchable: true, cacheable: true },
-    limits: { batch_size: 4 },
-  });
+test("parity fixtures compile identically to the Rust planner", () => {
+  const dir = path.join(repoRoot, "tests", "parity");
+  const fixtures = readdirSync(dir).filter((name) => name.endsWith(".json"));
+  assert.ok(fixtures.length >= 5, "expected at least 5 parity fixtures");
 
-  assert.equal(caps.effects?.batchable, true);
-  assert.equal(caps.limits?.batch_size, 4);
+  for (const name of fixtures) {
+    const fixture = JSON.parse(readFileSync(path.join(dir, name), "utf8"));
+    const compiled: Plan = fixture.intent
+      ? compileIntent(fixture.intent)
+      : compileRecipeWithParams(fixture.recipe, fixture.params ?? {});
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(compiled)),
+      fixture.plan,
+      `fixture '${name}' diverged`,
+    );
+  }
 });
 
-test("intent compiles refs and explicit ordering into plan dependencies", () => {
-  const source = intent()
-    .tool("echo", pure("local"))
-    .step("user", "echo", { id: "u_1" })
-    .step("profile", "echo", { user: ref(valueRef("user", ["id"])) }, ["audit"])
-    .output("profile", valueRef("profile"))
-    .toJSON();
+test("dynamic fan-out lowers to a for_each node", () => {
+  const compiled = compileRecipe(
+    tc
+      .recipe(fanOutRef("read", valueRef("search", ["hits"]), { inputKey: "doc" }))
+      .tool("read", pure("local"))
+      .toJSON(),
+  );
 
-  const compiled = compileIntent(source);
-
-  assert.deepEqual(compiled.nodes[1]?.depends_on, ["audit", "user"]);
-  assert.equal(compiled.outputs.profile, "profile.output");
+  assert.equal(compiled.nodes.length, 1);
+  assert.equal(compiled.nodes[0]?.for_each, "search.output.hits");
 });
 
-test("recipe compiles fan-out into independent plan nodes", () => {
+test("recipe params are validated", () => {
   const source = tc
-    .recipe(fanOut("read", ["a.md", "b.md"], { nodePrefix: "file_", inputKey: "path" }))
-    .name("read docs")
-    .tool("read", pure("fs.repo"))
-    .output("first", valueRef("file_1"))
+    .recipe(tc.fanOut("echo", [{ $param: "query" } as unknown as Json]))
+    .param("query")
+    .tool("echo", pure("local"))
     .toJSON();
 
-  const compiled = compileRecipe(source);
-
-  assert.equal(source.name, "read docs");
-  assert.equal(compiled.nodes.length, 2);
-  assert.equal(compiled.nodes[0]?.id, "file_1");
-  assert.deepEqual(compiled.nodes[0]?.input, { path: "a.md" });
-  assert.equal(compiled.outputs.first, "file_1.output");
-  assert.equal(tc.RECIPE_SCHEMA.properties.version.const, "0");
+  assert.throws(() => compileRecipe(source), /required/);
+  assert.throws(
+    () => compileRecipeWithParams(source, { other: 1 }),
+    /undeclared/,
+  );
+  const compiled = compileRecipeWithParams(source, { query: "ok" });
+  assert.deepEqual(compiled.nodes[0]?.input, "ok");
 });
 
-test("run result type matches composite tool feedback shape", () => {
+test("empty fan-out and unknown versions are rejected", () => {
+  assert.throws(
+    () => compileRecipe(tc.recipe(tc.fanOut("echo", [])).toJSON()),
+    /items/,
+  );
+  const bad = tc.recipe(tc.fanOut("echo", [1])).toJSON();
+  (bad as { version: string }).version = "9";
+  assert.throws(() => compileRecipe(bad), /version/);
+});
+
+test("intent compiler enforces the same rules as Rust", () => {
+  const base = () =>
+    intent().tool("echo", pure("local")).step("a", "echo", { v: 1 });
+
+  const duplicated = base().step("a", "echo").toJSON();
+  assert.throws(() => compileIntent(duplicated), /duplicate step id/);
+
+  const selfRef = intent()
+    .tool("echo", pure("local"))
+    .step("loop", "echo", { v: ref("loop.output") })
+    .toJSON();
+  assert.throws(() => compileIntent(selfRef), /references itself/);
+
+  const unknownTool = intent().step("a", "missing").toJSON();
+  assert.throws(() => compileIntent(unknownTool), /unknown tool/);
+
+  const dottedId = intent().tool("echo", pure("local")).step("a.b", "echo").toJSON();
+  assert.throws(() => compileIntent(dottedId), /must not contain/);
+});
+
+test("collectRefNodes throws on malformed refs and skips literals", () => {
+  assert.deepEqual(
+    collectRefNodes({
+      user: { $ref: "user.output" },
+      schema: literal({ $ref: "#/definitions/x" }) as unknown as Json,
+    }),
+    ["user"],
+  );
+  assert.throws(() => collectRefNodes({ bad: { $ref: 5 } as unknown as Json }));
+  assert.throws(() =>
+    collectRefNodes({ bad: { $ref: "a.output", extra: 1 } as unknown as Json }),
+  );
+  assert.throws(() => collectRefNodes({ bad: { $ref: "not-a-ref" } }));
+});
+
+test("valueRef escapes dotted path segments", () => {
+  assert.equal(valueRef("node", ["a.b", "c~d"]), "node.output.a~1b.c~0d");
+  assert.throws(() => valueRef("a.b"), /must not contain/);
+});
+
+test("write helper defaults to non-idempotent with an override", () => {
+  assert.equal(write("http", ["api:x"]).effects?.idempotent, false);
+  assert.equal(
+    write("fs", ["file:{path}"], { idempotent: true }).effects?.idempotent,
+    true,
+  );
+});
+
+test("run result v2 type matches composite tool feedback shape", () => {
   const result: RunResult = {
+    status: "failed",
     outputs: { answer: "ok" },
     node_outputs: { step: { answer: "ok" } },
-    trace: [{ node: "step", tool: "echo", status: "cache_hit", duration_ms: 0 }],
+    errors: { bad: { message: "boom", code: "timeout", retryable: true } },
+    skipped: { child: "failed_dependency" },
+    trace: [
+      {
+        node: "step",
+        tool: "echo",
+        status: "cache_hit",
+        at_ms: 1,
+        duration_ms: 0,
+      },
+    ],
     optimization: {
+      passes: ["dedup", "dce", "batch"],
       deduplicated: [],
+      eliminated: [],
       batch_groups: [],
-      fused_groups: [],
       summary: {
         estimated_tool_calls_before: 1,
         estimated_tool_calls_after: 1,
@@ -122,16 +224,27 @@ test("run result type matches composite tool feedback shape", () => {
         estimated_llm_turns_after: 1,
       },
     },
+    metrics: {
+      wall_ms: 3,
+      nodes_total: 2,
+      nodes_succeeded: 1,
+      nodes_failed: 1,
+      nodes_skipped: 0,
+      cache_hits: 1,
+      batch_dispatches: 0,
+      retries: 0,
+    },
   };
 
-  assert.equal(result.outputs.answer, "ok");
+  assert.equal(result.errors?.bad.code, "timeout");
 });
 
-test("conformance report type is exported", () => {
+test("conformance report type carries the adapter", () => {
   const report: ConformanceReport = {
+    adapter: "fs.repo",
     passed: true,
     checks: [{ name: "echo_round_trip", passed: true, message: "passed" }],
   };
 
-  assert.equal(report.checks[0]?.name, "echo_round_trip");
+  assert.equal(report.adapter, "fs.repo");
 });
