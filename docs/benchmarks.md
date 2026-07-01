@@ -28,13 +28,23 @@ npm run bench:suite -- --include-optional
 The optional MCP filesystem case launches a real MCP stdio server and may use
 network/package cache via `npx`, so it is excluded from the default suite.
 
+Methodology: each side runs `--warmup` unmeasured iterations (default 1),
+then the measured iterations are **interleaved** (baseline, compiled,
+baseline, ...) so neither side systematically benefits from warmer OS
+caches. The cache is cleared before every run, and the baseline is a
+cacheless serial execution — the honest stand-in for an agent driving one
+call per turn. `compile_ms` reports plan hydration + optimization separately
+from execution.
+
 The reported fields are intentionally host-facing:
 
+- `baseline`/`compiled.runs_ms` with `mean_ms`, `min_ms`, `max_ms`,
+  `stddev_ms`: the wall-clock distribution per side.
 - `estimated_tool_calls`: model-visible tool calls after optimization.
 - `estimated_llm_turns`: model feedback loops avoided by the composite call.
 - `trace_events`: internal execution events for observability.
 - `cache_hits`: reused cacheable outputs.
-- `speedup`: wall-clock baseline divided by compiled wall-clock.
+- `saved_ms` / `speedup`: computed from the mean wall times.
 
 ## Dogfood Targets
 

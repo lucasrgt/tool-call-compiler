@@ -125,7 +125,7 @@ impl Engine {
         &mut self,
         ready: &mut Vec<usize>,
         blocked: &mut Vec<usize>,
-        remaining: &mut Vec<usize>,
+        remaining: &mut [usize],
         running: &mut JoinSet<DispatchOutcome>,
         in_flight: &mut BTreeMap<tokio::task::Id, usize>,
     ) {
@@ -187,7 +187,7 @@ impl Engine {
     fn prepare_members(
         &mut self,
         unit: usize,
-        remaining: &mut Vec<usize>,
+        remaining: &mut [usize],
         ready: &mut Vec<usize>,
     ) -> Option<Vec<PreparedMember>> {
         let members = self.units[unit].members.clone();
@@ -404,7 +404,7 @@ impl Engine {
         &mut self,
         unit: usize,
         fallback: SkipReason,
-        remaining: &mut Vec<usize>,
+        remaining: &mut [usize],
         ready: &mut Vec<usize>,
     ) {
         for member in self.units[unit].members.clone() {
@@ -444,7 +444,7 @@ impl Engine {
 fn unblock(
     unit_dependents: &[BTreeSet<usize>],
     unit: usize,
-    remaining: &mut Vec<usize>,
+    remaining: &mut [usize],
     ready: &mut Vec<usize>,
 ) {
     for dependent in &unit_dependents[unit] {

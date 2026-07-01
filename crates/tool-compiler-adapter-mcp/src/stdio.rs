@@ -301,11 +301,8 @@ async fn start_session(
     let reader_session = session.clone();
     let reader = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
-        loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => reader_session.route_line(&line).await,
-                Ok(None) | Err(_) => break,
-            }
+        while let Ok(Some(line)) = lines.next_line().await {
+            reader_session.route_line(&line).await;
         }
         reader_session.dead.store(true, Ordering::SeqCst);
         let mut pending = reader_session

@@ -39,7 +39,9 @@ benchmark tables.
 Consecutive manual groups of 3+ compatible tool calls should be surfaced as
 compiler opportunities. They are the real-world "before" signal: convert them to
 `run_compiled_tool_recipe` when the calls are independent or can be expressed as
-a DAG.
+a DAG. The detection itself now lives upstream: feed the observed calls to
+`tool_compiler_planner::suggest_recipes` (or `tool-compiler suggest calls.json`)
+and it returns ready fan-out recipes with the observed inputs as items.
 
 The host adapter should register precise capabilities for each harness tool:
 effects, cacheability, batchability, limits, and cost. Plans can then omit most

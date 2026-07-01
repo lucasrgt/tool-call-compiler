@@ -78,27 +78,48 @@ The optimizer must refuse transformations when effects are missing or ambiguous.
 
 ## Quality Gates
 
-- Maximum 500 production LOC per Rust file.
-- Lines inside `#[cfg(test)] mod tests` do not count as production LOC.
-- Minimum line coverage: 95%.
-- Coverage command: `cargo llvm-cov --workspace --lib --tests --fail-under-lines 95`.
+- Maximum 500 production LOC per Rust file (test code excluded: `#[cfg(test)]`
+  items, `tests.rs` files, and `tests/` directories).
+- Minimum line coverage: 95% (`cargo run -p xtask -- coverage`).
+- `cargo run -p xtask -- check` = loc + fmt + clippy (-D warnings) +
+  example/schema validation + release consistency + tests (incl. doc-tests)
+  + coverage.
+- SDK parity with the Rust planner is enforced by shared fixtures under
+  `tests/parity/`.
 
-## Implemented Slice
+## Implemented Slice (v0.2)
 
-- Runtime registry maps adapter names to executors.
-- CLI supports `validate`, `layers`, `optimize`, `explain`, `compile-intent`, `run-intent`, `run`, `bench`, and `serve-mcp`.
-- `run` executes a compiled tool graph and returns JSON outputs, node outputs, trace, and optimization report.
-- `bench` compares serial baseline vs compiled execution, clears runtime cache between iterations, and reports elapsed time, estimated tool calls, estimated LLM turns, trace events, cache hits, saved milliseconds, and speedup.
-- Planner crate compiles an agent intent IR into executable `Plan` JSON by deriving dependencies from refs plus explicit `after` ordering.
-- Optimizer reports deduplicated nodes, batchable groups, fused groups, and summary counts for tool calls and LLM turns before/after compilation.
-- Runtime executes optimizer-selected `batch_groups` through the `call_batch` adapter contract.
-- Runtime registry can hydrate tool effects, limits, and cost from registered capabilities before optimization.
-- Runtime caches `pure`/`cacheable` tool outputs through a pluggable `ToolCache` trait and reports cache hits in traces.
-- Trace finish/error/cache events include `duration_ms`.
-- Runtime exports an adapter conformance suite covering echo round-trip, batch contract, and tool error propagation.
-- Explain diagnostics report why safe parallelization was blocked.
-- MCP adapter includes typed config, MCP executor, and persistent stdio JSON-RPC sessions for `initialize` + `tools/call`.
-- Filesystem and shell adapters are runnable from CLI runtime config; HTTP adapter has an injectable client executor.
-- CLI can load runtime adapters from config and can expose the compiler itself as one MCP stdio tool.
-- Examples include a live MCP filesystem benchmark config.
-- Public plan JSON Schema lives in `schemas/plan.schema.json`; public intent JSON Schema lives in `schemas/intent.schema.json`; both are mirrored by the TypeScript SDK.
+- IR v2: strict `$ref` shapes with `$literal` escapes, path escaping,
+  `deny_unknown_fields`, plan `name`/`description`, `ToolSpec.version`,
+  `Node.for_each` (dynamic fan-out) and `Node.when` (conditionals), and
+  per-node resource templates (`file:{path}`).
+- Graph validation resolves effects per node, treats vacuous declarations as
+  unknown, rejects contradictions and self-references, and allows same-tool
+  commutative write overlap.
+- Optimizer pipeline (dedup/CSE, dead-node elimination, batch grouping split
+  by `batch_size`) with cost estimates and grouped, transitively-aware
+  explain diagnostics.
+- Runtime: dependency-driven scheduler with a resource lock table, per-tool
+  and global concurrency limits, retry (backoff + jitter, idempotency-gated)
+  and timeout engines, write-aware cache invalidation with single-flight and
+  LRU/TTL, partial results (`errors`/`skipped`/`RunStatus`), trace v2
+  (timestamps, batch ids, attempts), compact result mode, redaction,
+  truncation budgets, cancellation, live event sink, `PreparedPlan`,
+  built-in pure data tools, capability input-schema validation, and a
+  blocked-tool recursion guard.
+- Adapters: fs (symlink containment, caps, transactional `write_files`,
+  native batch), shell (conservative `shell:world` default, env hygiene,
+  timeouts), http (headers, fixed response contract, reqwest client), mcp
+  (demultiplexed sessions, respawn, `isError` mapping, capability
+  derivation from annotations, HTTP transport, depth propagation).
+- Planner: step-attributed errors, recipes (`fan_out` static/dynamic,
+  `map_reduce`, `pipeline`, `params`), and opportunity mining from observed
+  call transcripts.
+- CLI: library-shaped commands (`validate`, `layers`, `optimize`,
+  `explain`, `compile-*`, `run-*`, `bench` with warmup/interleave/stddev,
+  `conformance`, `suggest`, `serve-mcp`), stdin plans, result shaping
+  flags; the MCP server embeds the schemas, survives malformed input, and
+  returns partial results as `isError` tool results.
+- Schemas v2 are the single source of truth; the TypeScript SDK generates
+  from them and mirrors the Rust planner exactly (shared parity fixtures in
+  `tests/parity/` run by both toolchains).
