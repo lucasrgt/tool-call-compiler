@@ -208,6 +208,8 @@ fn compile_step(step: IntentStep) -> Result<Node, PlannerError> {
         tool: step.tool,
         input: step.input,
         depends_on: depends_on.into_iter().collect(),
+        for_each: None,
+        when: None,
     })
 }
 
