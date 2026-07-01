@@ -48,6 +48,21 @@ pub trait ToolExecutor: Send + Sync {
     }
 }
 
+#[async_trait]
+impl<T: ToolExecutor + ?Sized> ToolExecutor for std::sync::Arc<T> {
+    async fn call(&self, tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
+        (**self).call(tool, input).await
+    }
+
+    async fn call_batch(
+        &self,
+        tool: &str,
+        inputs: Vec<BatchInput>,
+    ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
+        (**self).call_batch(tool, inputs).await
+    }
+}
+
 /// One entry of a batch dispatch: the node id and its resolved input.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BatchInput {

@@ -24,6 +24,7 @@ async-trait.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tool-compiler-adapter-api.workspace = true
 tool-compiler-adapter-fs.workspace = true
 tool-compiler-adapter-http = { workspace = true, features = ["reqwest"] }

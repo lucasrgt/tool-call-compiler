@@ -21,7 +21,9 @@ use tool_compiler_ir::{
 mod mining;
 mod recipes;
 
-pub use mining::{ObservedCall, Suggestion, SuggestionKind, suggest_recipes};
+pub use mining::{
+    DEFAULT_MIN_OCCURRENCES, ObservedCall, Suggestion, SuggestionKind, suggest_recipes,
+};
 pub use recipes::{
     FanOutRecipe, MapReduceRecipe, PipelineRecipe, PipelineStep, Recipe, RecipePlan,
     compile_recipe, compile_recipe_with_params,

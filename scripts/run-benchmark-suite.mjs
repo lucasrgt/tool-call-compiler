@@ -71,31 +71,32 @@ function runJson(command, args) {
   if (proc.status !== 0) {
     throw new Error(`${command} ${args.join(" ")} failed\n${proc.stderr || proc.stdout}`);
   }
-  const start = proc.stdout.indexOf("{");
-  if (start < 0) {
-    throw new Error(`command produced no JSON\n${proc.stdout}\n${proc.stderr}`);
+  try {
+    return JSON.parse(proc.stdout);
+  } catch (error) {
+    throw new Error(
+      `command stdout was not valid JSON (${error.message})\n--- stdout ---\n${proc.stdout}\n--- stderr ---\n${proc.stderr}`,
+    );
   }
-  return JSON.parse(proc.stdout.slice(start));
 }
 
 function summarize(entry, iterations, result) {
-  const beforeCalls = result.baseline.estimated_tool_calls;
-  const afterCalls = result.compiled.estimated_tool_calls;
-  const beforeTurns = result.baseline.estimated_llm_turns;
-  const afterTurns = result.compiled.estimated_llm_turns;
   return {
     id: entry.id,
     title: entry.title,
     description: entry.description,
     iterations,
-    baseline_ms: Number(result.baseline.elapsed_ms),
-    compiled_ms: Number(result.compiled.elapsed_ms),
+    compile_ms: Number(result.compile_ms),
+    baseline_ms: Number(result.baseline.mean_ms.toFixed(1)),
+    baseline_stddev_ms: Number(result.baseline.stddev_ms.toFixed(1)),
+    compiled_ms: Number(result.compiled.mean_ms.toFixed(1)),
+    compiled_stddev_ms: Number(result.compiled.stddev_ms.toFixed(1)),
     saved_ms: Number(result.saved_ms),
     speedup: Number(result.speedup),
-    calls_before: beforeCalls,
-    calls_after: afterCalls,
-    turns_before: beforeTurns,
-    turns_after: afterTurns,
+    calls_before: result.baseline.estimated_tool_calls,
+    calls_after: result.compiled.estimated_tool_calls,
+    turns_before: result.baseline.estimated_llm_turns,
+    turns_after: result.compiled.estimated_llm_turns,
     cache_hits: result.compiled.cache_hits,
     trace_events: result.compiled.trace_events,
   };
@@ -116,7 +117,7 @@ function markdown(report) {
       continue;
     }
     lines.push(
-      `| ${row.id} | ${row.iterations} | ${row.baseline_ms} | ${row.compiled_ms} | ${row.speedup.toFixed(2)}x | ${row.calls_before}->${row.calls_after} | ${row.turns_before}->${row.turns_after} | ${row.description ?? ""} |`,
+      `| ${row.id} | ${row.iterations} | ${row.baseline_ms}±${row.baseline_stddev_ms} | ${row.compiled_ms}±${row.compiled_stddev_ms} | ${row.speedup.toFixed(2)}x | ${row.calls_before}->${row.calls_after} | ${row.turns_before}->${row.turns_after} | ${row.description ?? ""} |`,
     );
   }
   lines.push("");

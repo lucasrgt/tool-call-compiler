@@ -1,7 +1,15 @@
-use async_trait::async_trait;
-use serde_json::{Value, json};
-use tool_compiler_runtime::{BatchInput, BatchOutput, ToolExecutionError, ToolExecutor};
+//! Deterministic local adapter used by examples and benchmarks.
+//!
+//! Tools: `const` (returns `input.value`), `echo`/`write` (return the
+//! input), `fail` (always errors). Every tool honors an optional `sleep_ms`
+//! field to simulate latency. Unknown tool names are errors — a typo in a
+//! plan must not "succeed".
 
+use async_trait::async_trait;
+use serde_json::Value;
+use tool_compiler_adapter_api::{BatchInput, BatchOutput, ToolExecutionError, ToolExecutor};
+
+/// The local example executor.
 pub struct LocalExecutor;
 
 #[async_trait]
@@ -14,6 +22,9 @@ impl ToolExecutor for LocalExecutor {
         local_output(tool, input)
     }
 
+    /// Ideal native batching: one shared sleep (the slowest item) instead of
+    /// the sum — deliberately best-case, since this adapter exists to
+    /// demonstrate what batching can save.
     async fn call_batch(
         &self,
         tool: &str,
@@ -42,9 +53,40 @@ impl ToolExecutor for LocalExecutor {
 
 fn local_output(tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
     match tool {
-        "const" => Ok(input.get("value").cloned().unwrap_or(input)),
+        "const" => input.get("value").cloned().ok_or_else(|| {
+            ToolExecutionError::new("const requires input.value").with_code("invalid_input")
+        }),
         "echo" | "write" => Ok(input),
         "fail" => Err(ToolExecutionError::new("local fail tool was called")),
-        other => Ok(json!({ "tool": other, "input": input })),
+        other => Err(
+            ToolExecutionError::new(format!("unknown local tool '{other}'"))
+                .with_code("unknown_tool"),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn unknown_tools_error_instead_of_echoing() {
+        let error = LocalExecutor.call("wrte", json!({})).await.unwrap_err();
+
+        assert_eq!(error.code.as_deref(), Some("unknown_tool"));
+    }
+
+    #[tokio::test]
+    async fn const_requires_a_value() {
+        let error = LocalExecutor.call("const", json!({})).await.unwrap_err();
+
+        assert_eq!(error.code.as_deref(), Some("invalid_input"));
+        let value = LocalExecutor
+            .call("const", json!({ "value": 7 }))
+            .await
+            .unwrap();
+        assert_eq!(value, json!(7));
     }
 }

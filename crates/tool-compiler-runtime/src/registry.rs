@@ -190,6 +190,12 @@ impl ToolRegistry {
     pub(crate) fn executor(&self, adapter: &str) -> Option<Arc<dyn ToolExecutor>> {
         self.adapters.get(adapter).cloned()
     }
+
+    /// Returns the executor registered for `adapter`, for direct use (for
+    /// example, running the conformance suite against it).
+    pub fn executor_for(&self, adapter: &str) -> Option<Arc<dyn ToolExecutor>> {
+        self.executor(adapter)
+    }
 }
 
 fn merge_capabilities(spec: &mut ToolSpec, capabilities: &ToolCapabilities) {
