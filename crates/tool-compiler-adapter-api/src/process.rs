@@ -9,17 +9,18 @@
 /// the name does not already carry an extension. On other platforms the list
 /// is just the literal command.
 pub fn command_candidates(command: &str) -> Vec<String> {
-    let mut candidates = vec![command.to_owned()];
-    #[cfg(windows)]
-    {
-        let lowered = command.to_ascii_lowercase();
-        if !lowered.ends_with(".cmd") && !lowered.ends_with(".exe") && !lowered.ends_with(".bat") {
-            candidates.push(format!("{command}.cmd"));
-            candidates.push(format!("{command}.exe"));
-            candidates.push(format!("{command}.bat"));
-        }
+    let lowered = command.to_ascii_lowercase();
+    let has_extension =
+        lowered.ends_with(".cmd") || lowered.ends_with(".exe") || lowered.ends_with(".bat");
+    if cfg!(windows) && !has_extension {
+        return vec![
+            command.to_owned(),
+            format!("{command}.cmd"),
+            format!("{command}.exe"),
+            format!("{command}.bat"),
+        ];
     }
-    candidates
+    vec![command.to_owned()]
 }
 
 #[cfg(test)]
