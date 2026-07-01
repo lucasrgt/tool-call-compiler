@@ -123,7 +123,10 @@ pub fn run_tool() -> ToolSpec {
 async fn run_command(executor: &ShellExecutor, input: Value) -> Result<Value, ShellError> {
     let program = required_str(&input, "program")?;
     let args = string_array(&input, "args")?;
-    let stdin_payload = input.get("stdin").and_then(Value::as_str).map(str::to_owned);
+    let stdin_payload = input
+        .get("stdin")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let timeout = input
         .get("timeout_ms")
         .and_then(Value::as_u64)
@@ -139,7 +142,13 @@ async fn run_command(executor: &ShellExecutor, input: Value) -> Result<Value, Sh
         })
         .or_else(|| executor.cwd.clone());
 
-    let mut child = spawn(executor, program, &args, cwd.as_deref(), stdin_payload.is_some())?;
+    let mut child = spawn(
+        executor,
+        program,
+        &args,
+        cwd.as_deref(),
+        stdin_payload.is_some(),
+    )?;
 
     if let Some(payload) = stdin_payload
         && let Some(mut stdin) = child.stdin.take()
@@ -220,11 +229,11 @@ fn spawn(
         }
     }
 
-    Err(last_error
-        .map(ShellError::Io)
-        .unwrap_or_else(|| ShellError::Io(std::io::Error::other(format!(
+    Err(last_error.map(ShellError::Io).unwrap_or_else(|| {
+        ShellError::Io(std::io::Error::other(format!(
             "program not found: {program}"
-        )))))
+        )))
+    }))
 }
 
 fn cap_output(bytes: &[u8], max_bytes: usize) -> (String, bool) {

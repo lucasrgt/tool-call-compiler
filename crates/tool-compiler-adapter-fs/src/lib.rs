@@ -150,8 +150,8 @@ impl ToolExecutor for FsExecutor {
             }
             match window.join_next().await {
                 Some(joined) => {
-                    let output = joined
-                        .map_err(|error| ToolExecutionError::new(error.to_string()))??;
+                    let output =
+                        joined.map_err(|error| ToolExecutionError::new(error.to_string()))??;
                     outputs.push(output);
                 }
                 None => break,
@@ -371,7 +371,10 @@ mod tests {
         let root = temp_root();
         let executor = FsExecutor::new(&root);
         executor
-            .call("write_file", json!({ "path": "keep.txt", "content": "old" }))
+            .call(
+                "write_file",
+                json!({ "path": "keep.txt", "content": "old" }),
+            )
             .await
             .unwrap();
 

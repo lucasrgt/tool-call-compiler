@@ -120,10 +120,7 @@ pub async fn handle_message(state: &ServeState, message: Value) -> Option<Value>
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
 
     match method {
-        "initialize" => Some(jsonrpc_result(
-            id,
-            initialize_result(message.get("params")),
-        )),
+        "initialize" => Some(jsonrpc_result(id, initialize_result(message.get("params")))),
         "ping" => Some(jsonrpc_result(id, json!({}))),
         "tools/list" => Some(jsonrpc_result(id, tools_list())),
         "tools/call" => Some(jsonrpc_result(id, call_tool(state, &message).await)),
@@ -141,7 +138,9 @@ fn initialize_result(params: Option<&Value>) -> Value {
     let requested = params
         .and_then(|params| params.get("protocolVersion"))
         .and_then(Value::as_str)
-        .filter(|version| version.len() == 10 && version.chars().filter(|c| *c == '-').count() == 2);
+        .filter(|version| {
+            version.len() == 10 && version.chars().filter(|c| *c == '-').count() == 2
+        });
     json!({
         "protocolVersion": requested.unwrap_or(tool_compiler_adapter_mcp::PROTOCOL_VERSION),
         "capabilities": {
@@ -420,9 +419,12 @@ mod tests {
 
     #[tokio::test]
     async fn ping_and_initialize_are_answered() {
-        let ping = handle_message(&state(), json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }))
-            .await
-            .unwrap();
+        let ping = handle_message(
+            &state(),
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }),
+        )
+        .await
+        .unwrap();
         assert_eq!(ping["result"], json!({}));
 
         let init = handle_message(
@@ -456,9 +458,12 @@ mod tests {
 
     #[tokio::test]
     async fn runs_plans_and_returns_structured_results() {
-        let response = handle_message(&state(), call("run_compiled_tool_graph", json!({ "plan": plan_json() })))
-            .await
-            .unwrap();
+        let response = handle_message(
+            &state(),
+            call("run_compiled_tool_graph", json!({ "plan": plan_json() })),
+        )
+        .await
+        .unwrap();
 
         let result = &response["result"];
         assert_eq!(result["isError"], false);
@@ -472,9 +477,12 @@ mod tests {
             "tools": { "fail": { "adapter": "local", "effects": { "pure": true } } },
             "nodes": [{ "id": "bad", "tool": "fail" }]
         });
-        let response = handle_message(&state(), call("run_compiled_tool_graph", json!({ "plan": plan })))
-            .await
-            .unwrap();
+        let response = handle_message(
+            &state(),
+            call("run_compiled_tool_graph", json!({ "plan": plan })),
+        )
+        .await
+        .unwrap();
 
         let result = &response["result"];
         assert_eq!(result["isError"], true);
@@ -514,9 +522,12 @@ mod tests {
 
     #[tokio::test]
     async fn explains_without_executing() {
-        let response = handle_message(&state(), call("explain_tool_plan", json!({ "plan": plan_json() })))
-            .await
-            .unwrap();
+        let response = handle_message(
+            &state(),
+            call("explain_tool_plan", json!({ "plan": plan_json() })),
+        )
+        .await
+        .unwrap();
 
         let result = &response["result"];
         assert_eq!(result["isError"], false);
@@ -525,13 +536,14 @@ mod tests {
 
     #[tokio::test]
     async fn depth_guard_refuses_nested_composition() {
-        let deep = ServeState::with_depth(
-            Runtime::single_adapter("local", LocalExecutor),
-            MAX_DEPTH,
-        );
-        let response = handle_message(&deep, call("run_compiled_tool_graph", json!({ "plan": plan_json() })))
-            .await
-            .unwrap();
+        let deep =
+            ServeState::with_depth(Runtime::single_adapter("local", LocalExecutor), MAX_DEPTH);
+        let response = handle_message(
+            &deep,
+            call("run_compiled_tool_graph", json!({ "plan": plan_json() })),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(response["result"]["isError"], true);
     }

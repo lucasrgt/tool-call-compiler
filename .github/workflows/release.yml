@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish crates/npm packages instead of dry-run only"
+        description: "Publish crates/npm packages"
         required: true
         default: "false"
         type: choice
@@ -16,8 +16,74 @@ on:
           - "true"
 
 jobs:
-  package:
-    name: package
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: cargo run -p xtask -- check
+      - run: npm test
+      - run: npm run build
+
+  binaries:
+    name: binaries (${{ matrix.target.os }})
+    needs: gate
+    runs-on: ${{ matrix.target.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { os: ubuntu-latest, suffix: linux-x86_64, exe: tool-compiler }
+          - { os: windows-latest, suffix: windows-x86_64, exe: tool-compiler.exe }
+          - { os: macos-latest, suffix: macos-aarch64, exe: tool-compiler }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p tool-compiler-cli
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp "target/release/${{ matrix.target.exe }}" "artifacts/tool-compiler-${{ matrix.target.suffix }}${{ matrix.target.exe == 'tool-compiler.exe' && '.exe' || '' }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target.suffix }}
+          path: artifacts
+
+  github-release:
+    name: github release
+    needs: binaries
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          merge-multiple: true
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+
+  publish:
+    name: publish packages
+    needs: gate
+    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -25,45 +91,48 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
+          registry-url: "https://registry.npmjs.org"
       - uses: Swatinem/rust-cache@v2
-
-      - run: cargo test --workspace
-      - run: cargo run -p xtask -- check
       - run: npm ci
-      - run: npm test
 
-      - name: Package Rust seed crate
-        run: |
-          mkdir -p artifacts/crates
-          cargo package --manifest-path crates/tool-compiler-ir/Cargo.toml
-          cp target/package/*.crate artifacts/crates/
-          cargo metadata --no-deps --format-version 1 > artifacts/crates/workspace-metadata.json
-
-      - name: Package npm SDK
-        run: |
-          npm pack --workspace @tool-compiler/sdk-node --pack-destination artifacts
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tool-call-compiler-packages
-          path: artifacts
-
-      - name: Publish crates
-        if: ${{ github.event.inputs.publish == 'true' }}
+      - name: Publish crates in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          for manifest in crates/tool-compiler-{ir,graph,optimizer,runtime,planner,adapter-fs,adapter-http,adapter-mcp,adapter-shell,cli}/Cargo.toml; do
-            cargo publish --manifest-path "$manifest"
+          crates=(
+            tool-compiler-ir
+            tool-compiler-adapter-api
+            tool-compiler-graph
+            tool-compiler-optimizer
+            tool-compiler-runtime
+            tool-compiler-planner
+            tool-compiler-adapter-fs
+            tool-compiler-adapter-http
+            tool-compiler-adapter-mcp
+            tool-compiler-adapter-shell
+            tool-compiler-cli
+          )
+          for crate in "${crates[@]}"; do
+            # Retry: freshly published dependencies take a moment to appear
+            # in the sparse index, which makes the next publish flaky.
+            for attempt in 1 2 3 4 5; do
+              if cargo publish -p "$crate"; then
+                break
+              fi
+              if [ "$attempt" = "5" ]; then
+                echo "publishing $crate failed after $attempt attempts" >&2
+                exit 1
+              fi
+              echo "retrying $crate in 30s (attempt $attempt failed)"
+              sleep 30
+            done
           done
 
       - name: Publish npm SDK
-        if: ${{ github.event.inputs.publish == 'true' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --workspace @tool-compiler/sdk-node --access public
+        run: npm publish --workspace @tool-compiler/sdk-node --access public --provenance

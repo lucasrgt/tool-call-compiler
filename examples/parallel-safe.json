@@ -26,10 +26,7 @@
       "id": "orders",
       "tool": "const",
       "input": {
-        "value": [
-          "o_1",
-          "o_2"
-        ]
+        "value": ["o_1", "o_2"]
       }
     }
   ],
@@ -38,4 +35,3 @@
     "orders": "orders.output"
   }
 }
-

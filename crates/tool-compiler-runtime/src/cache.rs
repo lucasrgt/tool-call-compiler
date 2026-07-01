@@ -104,7 +104,9 @@ impl MemoryCache {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|poison| poison.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 }
 
@@ -149,9 +151,7 @@ impl ToolCache for MemoryCache {
         let clock = inner.clock;
 
         let expired = match inner.entries.get(key) {
-            Some(entry) => self
-                .ttl
-                .is_some_and(|ttl| entry.inserted.elapsed() > ttl),
+            Some(entry) => self.ttl.is_some_and(|ttl| entry.inserted.elapsed() > ttl),
             None => return None,
         };
         if expired {
@@ -296,7 +296,9 @@ mod tests {
         v1.version = Some("1".into());
         let mut v2 = key("tool");
         v2.version = Some("2".into());
-        cache.insert(v1.clone(), Arc::new(json!(1)), BTreeSet::new()).await;
+        cache
+            .insert(v1.clone(), Arc::new(json!(1)), BTreeSet::new())
+            .await;
 
         assert!(cache.get(&v2).await.is_none());
         assert!(cache.get(&v1).await.is_some());

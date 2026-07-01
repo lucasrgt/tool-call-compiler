@@ -9,11 +9,11 @@ const schemasDir = path.resolve(here, "..", "..", "..", "schemas");
 const outFile = path.resolve(here, "..", "src", "schemas.gen.ts");
 
 const load = (name) =>
-  JSON.stringify(
-    JSON.parse(readFileSync(path.join(schemasDir, name), "utf8")),
-    null,
-    2,
-  );
+    JSON.stringify(
+        JSON.parse(readFileSync(path.join(schemasDir, name), "utf8")),
+        null,
+        2,
+    );
 
 const banner = `// GENERATED FILE — do not edit. Source of truth: /schemas/*.json.
 // Regenerate with: npm run generate (runs automatically on build/test).

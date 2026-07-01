@@ -28,8 +28,7 @@ impl CallPolicy {
         let timeout_ms = effects
             .and_then(|effects| effects.timeout_ms)
             .or(default_timeout_ms);
-        let retry_allowed =
-            effects.is_some_and(|effects| effects.idempotent || effects.pure);
+        let retry_allowed = effects.is_some_and(|effects| effects.idempotent || effects.pure);
         let retry = effects.and_then(|effects| effects.retry.as_ref());
 
         Self {

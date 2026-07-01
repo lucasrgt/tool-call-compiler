@@ -126,12 +126,12 @@ async fn check_batch_contract(executor: &impl ToolExecutor, echo_tool: &str) -> 
     match executor.call_batch(echo_tool, inputs).await {
         Ok(outputs) => {
             let mapped = outputs.len() == 2
-                && outputs.iter().any(|output| {
-                    output.node == "a" && output.output == json!({ "id": "a" })
-                })
-                && outputs.iter().any(|output| {
-                    output.node == "b" && output.output == json!({ "id": "b" })
-                });
+                && outputs
+                    .iter()
+                    .any(|output| output.node == "a" && output.output == json!({ "id": "a" }))
+                && outputs
+                    .iter()
+                    .any(|output| output.node == "b" && output.output == json!({ "id": "b" }));
             if mapped {
                 pass("batch_contract")
             } else {

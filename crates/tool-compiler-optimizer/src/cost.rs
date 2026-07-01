@@ -41,12 +41,7 @@ pub(crate) fn summarize(
     let (estimated_compiled_ms, estimated_tokens_after) = if costs.declared {
         (
             Some(costs.compiled_ms(plan, graph, report)),
-            Some(
-                plan.nodes
-                    .iter()
-                    .map(|node| costs.tokens(&node.tool))
-                    .sum(),
-            ),
+            Some(plan.nodes.iter().map(|node| costs.tokens(&node.tool)).sum()),
         )
     } else {
         (None, None)

@@ -88,8 +88,7 @@ impl LockTable {
             match self.resources.get_mut(resource) {
                 Some(LockState::Read(count)) => *count += 1,
                 None => {
-                    self.resources
-                        .insert(resource.clone(), LockState::Read(1));
+                    self.resources.insert(resource.clone(), LockState::Read(1));
                 }
                 Some(_) => unreachable!("compatibility checked above"),
             }

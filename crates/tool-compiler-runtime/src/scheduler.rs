@@ -1,4 +1,4 @@
-//! Dependency-driven scheduler.
+//! Dependency-driven scheduling loop.
 //!
 //! Nodes start as soon as their dependencies finish — there is no layer
 //! barrier. Effect safety is enforced at runtime by a resource lock table
@@ -7,29 +7,27 @@
 //! layered model while letting independent branches overlap.
 //!
 //! Failures never abort in-flight work: the engine stops scheduling (in
-//! fail-fast mode), drains what is running, and returns a partial
-//! [`RunResult`] with per-node errors and skips.
+//! fail-fast mode), drains what is running, and returns a partial result
+//! with per-node errors and skips.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde_json::Value;
 use tokio::task::JoinSet;
-use tool_compiler_adapter_api::{ToolExecutionError, ToolExecutor};
-use tool_compiler_graph::{ExecutionGraph, ResolvedEffects};
-use tool_compiler_ir::{Node, NodeId, Plan, ToolName, When, collect_refs};
-use tool_compiler_optimizer::OptimizationReport;
+use tool_compiler_adapter_api::ToolExecutionError;
+use tool_compiler_ir::{Node, When};
 
 use crate::dispatch::{
     DispatchContext, DispatchOutcome, PreparedMember, UnitSpec, dispatch_unit, member_from_plan,
 };
-use crate::locks::{LockRequest, LockTable};
-use crate::policy::CallPolicy;
+use crate::engine::{Engine, Unit};
 use crate::refs::{resolve_input, resolve_value_ref};
-use crate::result::{RunMetrics, RunResult, RunStatus, SkipReason, TraceEvent, TraceStatus};
-use crate::{ErrorMode, ResultMode, RunConfig, Runtime, RuntimeError, result::shape_output};
+use crate::result::{RunResult, SkipReason, TraceEvent, TraceStatus};
+use crate::{ErrorMode, RuntimeError};
 
 static BATCH_IDS: AtomicU64 = AtomicU64::new(1);
 
@@ -37,211 +35,7 @@ pub(crate) fn next_batch_id() -> u64 {
     BATCH_IDS.fetch_add(1, Ordering::Relaxed)
 }
 
-#[derive(Clone, Debug)]
-struct Unit {
-    members: Vec<NodeId>,
-    tool: ToolName,
-    adapter: String,
-    batch: bool,
-    lock: LockRequest,
-    cost: u64,
-}
-
-pub(crate) struct Engine {
-    plan: Plan,
-    config: RunConfig,
-    optimization: OptimizationReport,
-    context_seed: ContextSeed,
-    nodes: BTreeMap<NodeId, Arc<Node>>,
-    effects: BTreeMap<NodeId, ResolvedEffects>,
-    data_deps: BTreeMap<NodeId, BTreeSet<NodeId>>,
-    units: Vec<Unit>,
-    unit_deps: Vec<BTreeSet<usize>>,
-    unit_dependents: Vec<BTreeSet<usize>>,
-    serial_position: Option<BTreeMap<usize, usize>>,
-    blocked_tools: BTreeSet<String>,
-    validators: BTreeMap<ToolName, Arc<jsonschema::Validator>>,
-
-    outputs: BTreeMap<NodeId, Value>,
-    dead: BTreeSet<NodeId>,
-    errors: BTreeMap<NodeId, ToolExecutionError>,
-    skipped: BTreeMap<NodeId, SkipReason>,
-    trace: Vec<TraceEvent>,
-    metrics: RunMetrics,
-    locks: LockTable,
-    tool_in_flight: BTreeMap<ToolName, usize>,
-    total_in_flight: usize,
-    stop: Option<SkipReason>,
-}
-
-struct ContextSeed {
-    executors: BTreeMap<String, Arc<dyn ToolExecutor>>,
-    cache: Arc<dyn crate::cache::ToolCache>,
-    single_flight: Arc<crate::policy::SingleFlight>,
-}
-
 impl Engine {
-    pub(crate) fn new(
-        runtime: &Runtime,
-        plan: Plan,
-        graph: &ExecutionGraph,
-        optimization: OptimizationReport,
-        config: RunConfig,
-        serial: bool,
-    ) -> Result<Self, RuntimeError> {
-        let mut executors = BTreeMap::new();
-        for spec in plan.tools.values() {
-            if !executors.contains_key(&spec.adapter) {
-                let executor = runtime.registry().executor(&spec.adapter).ok_or_else(|| {
-                    RuntimeError::MissingAdapter {
-                        adapter: spec.adapter.clone(),
-                    }
-                })?;
-                executors.insert(spec.adapter.clone(), executor);
-            }
-        }
-
-        let mut validators = BTreeMap::new();
-        for (tool, spec) in &plan.tools {
-            if let Some(schema) = runtime
-                .registry()
-                .capabilities_for(&spec.adapter, tool)
-                .and_then(|capabilities| capabilities.input_schema.as_ref())
-            {
-                let validator = jsonschema::validator_for(schema).map_err(|error| {
-                    RuntimeError::InvalidInputSchema {
-                        tool: tool.clone(),
-                        message: error.to_string(),
-                    }
-                })?;
-                validators.insert(tool.clone(), Arc::new(validator));
-            }
-        }
-
-        let nodes: BTreeMap<NodeId, Arc<Node>> = plan
-            .nodes
-            .iter()
-            .map(|node| (node.id.clone(), Arc::new(node.clone())))
-            .collect();
-
-        let mut data_deps = BTreeMap::new();
-        for node in nodes.values() {
-            let mut deps = BTreeSet::new();
-            if let Ok(refs) = collect_refs(&node.input) {
-                deps.extend(refs.into_iter().map(|r| r.node().to_owned()));
-            }
-            if let Some(items) = &node.for_each {
-                deps.insert(items.node().to_owned());
-            }
-            if let Some(when) = &node.when {
-                deps.insert(when.target.node().to_owned());
-            }
-            data_deps.insert(node.id.clone(), deps);
-        }
-
-        let mut units: Vec<Unit> = Vec::new();
-        let mut unit_of = BTreeMap::<NodeId, usize>::new();
-        if !serial {
-            for group in &optimization.batch_groups {
-                let index = units.len();
-                let mut lock = LockRequest::default();
-                for member in &group.nodes {
-                    lock.merge(&LockRequest::for_effects(&graph.resolved_effects()[member]));
-                    unit_of.insert(member.clone(), index);
-                }
-                units.push(Unit {
-                    cost: unit_cost(&plan, &group.tool, group.nodes.len() as u64),
-                    members: group.nodes.clone(),
-                    tool: group.tool.clone(),
-                    adapter: group.adapter.clone(),
-                    batch: true,
-                    lock,
-                });
-            }
-        }
-        for node in nodes.values() {
-            if unit_of.contains_key(&node.id) {
-                continue;
-            }
-            let index = units.len();
-            let adapter = plan
-                .tools
-                .get(&node.tool)
-                .map(|spec| spec.adapter.clone())
-                .unwrap_or_default();
-            units.push(Unit {
-                members: vec![node.id.clone()],
-                tool: node.tool.clone(),
-                adapter,
-                batch: false,
-                lock: LockRequest::for_effects(&graph.resolved_effects()[&node.id]),
-                cost: unit_cost(&plan, &node.tool, 1),
-            });
-            unit_of.insert(node.id.clone(), index);
-        }
-
-        let mut unit_deps = vec![BTreeSet::new(); units.len()];
-        let mut unit_dependents = vec![BTreeSet::new(); units.len()];
-        for (node, deps) in graph.dependencies() {
-            let unit = unit_of[node];
-            for dep in deps {
-                let dep_unit = unit_of[dep];
-                if dep_unit != unit {
-                    unit_deps[unit].insert(dep_unit);
-                    unit_dependents[dep_unit].insert(unit);
-                }
-            }
-        }
-
-        let serial_position = serial.then(|| {
-            graph
-                .layers()
-                .iter()
-                .flatten()
-                .enumerate()
-                .map(|(position, node)| (unit_of[node], position))
-                .collect()
-        });
-
-        Ok(Self {
-            metrics: RunMetrics {
-                nodes_total: plan.nodes.len(),
-                ..RunMetrics::default()
-            },
-            effects: graph.resolved_effects().clone(),
-            context_seed: ContextSeed {
-                executors,
-                cache: runtime.cache().clone(),
-                single_flight: runtime.single_flight().clone(),
-            },
-            blocked_tools: plan
-                .tools
-                .keys()
-                .filter(|tool| runtime.registry().is_blocked(tool))
-                .cloned()
-                .collect(),
-            validators,
-            plan,
-            config,
-            optimization,
-            nodes,
-            data_deps,
-            units,
-            unit_deps,
-            unit_dependents,
-            serial_position,
-            outputs: BTreeMap::new(),
-            dead: BTreeSet::new(),
-            errors: BTreeMap::new(),
-            skipped: BTreeMap::new(),
-            trace: Vec::new(),
-            locks: LockTable::default(),
-            tool_in_flight: BTreeMap::new(),
-            total_in_flight: 0,
-            stop: None,
-        })
-    }
-
     pub(crate) async fn run(mut self) -> Result<RunResult, RuntimeError> {
         let started = Instant::now();
         let span = tracing::debug_span!("tool_compiler_run", plan = self.plan.name.as_deref());
@@ -258,7 +52,13 @@ impl Engine {
         let mut in_flight: BTreeMap<tokio::task::Id, usize> = BTreeMap::new();
 
         loop {
-            self.schedule(&mut ready, &mut blocked, &mut remaining, &mut running, &mut in_flight);
+            self.schedule(
+                &mut ready,
+                &mut blocked,
+                &mut remaining,
+                &mut running,
+                &mut in_flight,
+            );
 
             if running.is_empty() {
                 if ready.is_empty() && blocked.is_empty() {
@@ -277,8 +77,7 @@ impl Engine {
                     &mut in_flight,
                 );
                 if running.len() == before_running && running.is_empty() {
-                    let leftovers: Vec<usize> =
-                        blocked.drain(..).chain(ready.drain(..)).collect();
+                    let leftovers: Vec<usize> = blocked.drain(..).chain(ready.drain(..)).collect();
                     for unit in leftovers {
                         self.settle_unit(unit, SkipReason::NotRun, &mut remaining, &mut ready);
                     }
@@ -308,9 +107,7 @@ impl Engine {
                     outcome,
                 ),
                 Err(join_error) => {
-                    let unit = in_flight
-                        .remove(&join_error.id())
-                        .expect("task registered");
+                    let unit = in_flight.remove(&join_error.id()).expect("task registered");
                     (unit, panicked_outcome(&self.units[unit], &join_error))
                 }
             };
@@ -482,13 +279,16 @@ impl Engine {
             .tools
             .get(&node.tool)
             .and_then(|spec| spec.effects.as_ref());
-        let policy = CallPolicy::from_effects(effects, self.config.default_timeout_ms);
+        let policy =
+            crate::policy::CallPolicy::from_effects(effects, self.config.default_timeout_ms);
         let reads = self
             .effects
             .get(&node.id)
             .map(|effects| effects.reads.clone())
             .unwrap_or_default();
-        Ok(member_from_plan(node, &self.plan, input, items, policy, reads))
+        Ok(member_from_plan(
+            node, &self.plan, input, items, policy, reads,
+        ))
     }
 
     fn evaluate_when(&self, when: &When) -> Result<bool, ToolExecutionError> {
@@ -592,7 +392,7 @@ impl Engine {
         self.record_failure(node, error);
     }
 
-    fn complete_skip(&mut self, node: &str, reason: SkipReason) {
+    pub(crate) fn complete_skip(&mut self, node: &str, reason: SkipReason) {
         let tool = self.nodes[node].tool.clone();
         self.push_event(TraceEvent::new(node, &tool, TraceStatus::Skipped));
         self.metrics.nodes_skipped += 1;
@@ -627,7 +427,7 @@ impl Engine {
         unblock(&self.unit_dependents, unit, remaining, ready);
     }
 
-    fn is_settled(&self, node: &str) -> bool {
+    pub(crate) fn is_settled(&self, node: &str) -> bool {
         self.outputs.contains_key(node)
             || self.errors.contains_key(node)
             || self.skipped.contains_key(node)
@@ -638,89 +438,6 @@ impl Engine {
             let _ = sink.send(event.clone());
         }
         self.trace.push(event);
-    }
-
-    fn finish(mut self, started: Instant) -> Result<RunResult, RuntimeError> {
-        let unsettled: Vec<NodeId> = self
-            .nodes
-            .keys()
-            .filter(|node| !self.is_settled(node))
-            .cloned()
-            .collect();
-        for node in unsettled {
-            let reason = if self
-                .data_deps
-                .get(&node)
-                .is_some_and(|deps| deps.iter().any(|dep| self.dead.contains(dep)))
-            {
-                SkipReason::FailedDependency
-            } else {
-                self.stop.unwrap_or(SkipReason::NotRun)
-            };
-            self.complete_skip(&node, reason);
-        }
-
-        let mut outputs = BTreeMap::new();
-        for (name, value_ref) in &self.plan.outputs {
-            match resolve_value_ref(value_ref, &self.outputs) {
-                Ok(value) => {
-                    outputs.insert(name.clone(), value);
-                }
-                Err(error) => {
-                    if !self.dead.contains(value_ref.node()) {
-                        self.errors.insert(
-                            format!("outputs.{name}"),
-                            resolution_error(error).with_code("unresolved_output"),
-                        );
-                    }
-                }
-            }
-        }
-
-        let redactor = self.config.redactor.clone();
-        let max_bytes = self.config.max_output_bytes;
-        let outputs = outputs
-            .into_iter()
-            .map(|(name, value)| {
-                let shaped = shape_output(&name, value, redactor.as_ref(), max_bytes);
-                (name, shaped)
-            })
-            .collect();
-        let node_outputs: BTreeMap<NodeId, Value> = match self.config.result_mode {
-            ResultMode::Compact => BTreeMap::new(),
-            ResultMode::Full => self
-                .outputs
-                .into_iter()
-                .map(|(node, value)| {
-                    let shaped = shape_output(&node, value, redactor.as_ref(), max_bytes);
-                    (node, shaped)
-                })
-                .collect(),
-        };
-        let trace = match self.config.result_mode {
-            ResultMode::Compact => Vec::new(),
-            ResultMode::Full => self.trace,
-        };
-
-        self.metrics.wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let status = if self.stop == Some(SkipReason::Cancelled) {
-            RunStatus::Cancelled
-        } else if self.errors.is_empty() {
-            RunStatus::Success
-        } else {
-            RunStatus::Failed
-        };
-
-        Ok(RunResult {
-            status,
-            outputs,
-            node_outputs,
-            errors: self.errors,
-            skipped: self.skipped,
-            trace,
-            optimization: self.optimization,
-            metrics: self.metrics,
-        })
     }
 }
 
@@ -738,16 +455,7 @@ fn unblock(
     }
 }
 
-fn unit_cost(plan: &Plan, tool: &str, calls: u64) -> u64 {
-    let cost = plan
-        .tools
-        .get(tool)
-        .and_then(|spec| spec.cost.clone())
-        .unwrap_or_default();
-    cost.fixed_ms.unwrap_or(0) + cost.per_call_ms.unwrap_or(0).saturating_mul(calls)
-}
-
-fn resolution_error(error: RuntimeError) -> ToolExecutionError {
+pub(crate) fn resolution_error(error: RuntimeError) -> ToolExecutionError {
     let code = match &error {
         RuntimeError::MissingNodeOutput(_) => "missing_node_output",
         RuntimeError::MissingPath { .. } => "missing_path",

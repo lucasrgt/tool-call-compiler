@@ -7,6 +7,6 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const cjsDir = path.resolve(here, "..", "dist", "cjs");
 mkdirSync(cjsDir, { recursive: true });
 writeFileSync(
-  path.join(cjsDir, "package.json"),
-  `${JSON.stringify({ type: "commonjs" }, null, 2)}\n`,
+    path.join(cjsDir, "package.json"),
+    `${JSON.stringify({ type: "commonjs" }, null, 2)}\n`,
 );

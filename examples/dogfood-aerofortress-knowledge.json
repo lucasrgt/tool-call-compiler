@@ -20,11 +20,7 @@
   "recipe": {
     "kind": "fan_out",
     "tool": "knowledge_lookup",
-    "items": [
-      "tool compiler",
-      "codegraph",
-      "aerofortress harness integration"
-    ],
+    "items": ["tool compiler", "codegraph", "aerofortress harness integration"],
     "node_prefix": "lookup_",
     "input_key": "q"
   },

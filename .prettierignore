@@ -1,0 +1,10 @@
+# Generated / vendored / lockfiles
+node_modules/
+target/
+sdk/node/dist/
+sdk/node/dist-test/
+sdk/node/src/schemas.gen.ts
+reports/
+package-lock.json
+Cargo.lock
+.aerofortress/

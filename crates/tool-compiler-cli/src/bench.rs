@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 use tool_compiler_ir::Plan;
-use tool_compiler_runtime::{ResultMode, RunConfig, Runtime, RunResult, TraceStatus};
+use tool_compiler_runtime::{ResultMode, RunConfig, RunResult, Runtime, TraceStatus};
 
 use crate::CliError;
 

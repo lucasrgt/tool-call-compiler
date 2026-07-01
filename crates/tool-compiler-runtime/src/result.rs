@@ -206,7 +206,10 @@ impl KeyRedactor {
     /// Masks the given key names with `"[redacted]"`.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
-            keys: keys.into_iter().map(|key| key.into().to_lowercase()).collect(),
+            keys: keys
+                .into_iter()
+                .map(|key| key.into().to_lowercase())
+                .collect(),
             replacement: "[redacted]".into(),
         }
     }
@@ -229,7 +232,11 @@ impl KeyRedactor {
             Value::Object(map) => Value::Object(
                 map.iter()
                     .map(|(key, value)| {
-                        if self.keys.iter().any(|needle| key.to_lowercase().contains(needle)) {
+                        if self
+                            .keys
+                            .iter()
+                            .any(|needle| key.to_lowercase().contains(needle))
+                        {
                             (key.clone(), Value::String(self.replacement.clone()))
                         } else {
                             (key.clone(), self.redact_value(value))

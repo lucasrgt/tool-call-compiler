@@ -25,6 +25,8 @@ mod builtin;
 mod cache;
 mod conformance;
 mod dispatch;
+mod engine;
+mod finish;
 mod locks;
 mod policy;
 mod refs;
@@ -45,8 +47,8 @@ pub use result::{
 };
 pub use tool_compiler_adapter_api::{BatchInput, BatchOutput, ToolExecutionError, ToolExecutor};
 
+use crate::engine::Engine;
 use crate::policy::SingleFlight;
-use crate::scheduler::Engine;
 
 /// What to do when a node fails.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -273,9 +275,16 @@ impl Runtime {
     ) -> Result<RunResult, RuntimeError> {
         self.registry.apply_capabilities(&mut plan);
         let graph = validate(&plan)?;
-        Engine::new(self, plan, &graph, OptimizationReport::default(), config, false)?
-            .run()
-            .await
+        Engine::new(
+            self,
+            plan,
+            &graph,
+            OptimizationReport::default(),
+            config,
+            false,
+        )?
+        .run()
+        .await
     }
 
     /// Executes `plan` one dispatch at a time in graph order — the serial
@@ -293,9 +302,16 @@ impl Runtime {
     ) -> Result<RunResult, RuntimeError> {
         self.registry.apply_capabilities(&mut plan);
         let graph = validate(&plan)?;
-        Engine::new(self, plan, &graph, OptimizationReport::default(), config, true)?
-            .run()
-            .await
+        Engine::new(
+            self,
+            plan,
+            &graph,
+            OptimizationReport::default(),
+            config,
+            true,
+        )?
+        .run()
+        .await
     }
 }
 

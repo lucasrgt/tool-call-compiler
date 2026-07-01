@@ -8,6 +8,11 @@
   "scripts": {
     "build": "npm run build --workspace @tool-compiler/sdk-node",
     "bench:suite": "node scripts/run-benchmark-suite.mjs",
+    "fmt": "prettier --write .",
+    "fmt:check": "prettier --check .",
     "test": "npm run test --workspace @tool-compiler/sdk-node"
+  },
+  "devDependencies": {
+    "prettier": "^3.5.0"
   }
 }

@@ -171,8 +171,14 @@ async fn stdio_client_pipelines_calls_and_skips_notifications() {
         .unwrap();
 
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].result["structuredContent"]["arguments"]["id"], "a");
-    assert_eq!(results[1].result["structuredContent"]["arguments"]["id"], "b");
+    assert_eq!(
+        results[0].result["structuredContent"]["arguments"]["id"],
+        "a"
+    );
+    assert_eq!(
+        results[1].result["structuredContent"]["arguments"]["id"],
+        "b"
+    );
 }
 
 #[tokio::test]

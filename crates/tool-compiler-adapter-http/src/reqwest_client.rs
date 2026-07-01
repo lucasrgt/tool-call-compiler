@@ -59,7 +59,11 @@ impl ReqwestHttpClient {
 
     fn full_url(&self, url: &str) -> String {
         match (&self.base_url, url.starts_with("http")) {
-            (Some(base), false) => format!("{}/{}", base.trim_end_matches('/'), url.trim_start_matches('/')),
+            (Some(base), false) => format!(
+                "{}/{}",
+                base.trim_end_matches('/'),
+                url.trim_start_matches('/')
+            ),
             _ => url.to_owned(),
         }
     }
@@ -132,6 +136,9 @@ mod tests {
             .with_base_url("https://api.test/");
 
         assert_eq!(client.full_url("/users"), "https://api.test/users");
-        assert_eq!(client.full_url("https://other.test/x"), "https://other.test/x");
+        assert_eq!(
+            client.full_url("https://other.test/x"),
+            "https://other.test/x"
+        );
     }
 }

@@ -28,10 +28,9 @@ fn every_parity_fixture_compiles_to_its_expected_plan() {
             continue;
         }
 
-        let fixture: Value = serde_json::from_str(
-            &std::fs::read_to_string(&path).expect("fixture is readable"),
-        )
-        .expect("fixture is valid JSON");
+        let fixture: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("fixture is readable"))
+                .expect("fixture is valid JSON");
         let name = fixture["name"].as_str().unwrap_or("unnamed").to_owned();
         let expected = fixture["plan"].clone();
 
@@ -60,5 +59,8 @@ fn every_parity_fixture_compiles_to_its_expected_plan() {
         checked += 1;
     }
 
-    assert!(checked >= 5, "expected at least 5 parity fixtures, found {checked}");
+    assert!(
+        checked >= 5,
+        "expected at least 5 parity fixtures, found {checked}"
+    );
 }

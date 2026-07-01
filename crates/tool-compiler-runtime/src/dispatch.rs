@@ -118,21 +118,25 @@ async fn dispatch_single(
         && let Some(cached) = context.cache.get(key).await
     {
         outcome.cache_hits += 1;
-        outcome
-            .events
-            .push(TraceEvent::new(&member.node, &spec.tool, TraceStatus::CacheHit));
+        outcome.events.push(TraceEvent::new(
+            &member.node,
+            &spec.tool,
+            TraceStatus::CacheHit,
+        ));
         outcome
             .results
             .push((member.node, cached.as_ref().clone()).into_ok());
         return;
     }
 
-    outcome
-        .events
-        .push(TraceEvent::new(&member.node, &spec.tool, TraceStatus::Started));
+    outcome.events.push(TraceEvent::new(
+        &member.node,
+        &spec.tool,
+        TraceStatus::Started,
+    ));
     let started = Instant::now();
-    let result = call_with_policy(&context.executor, &spec.tool, &member.input, &member.policy)
-        .await;
+    let result =
+        call_with_policy(&context.executor, &spec.tool, &member.input, &member.policy).await;
     let duration = elapsed_ms(started);
 
     record_retries(&member.node, &spec.tool, &result.retries, outcome);
@@ -177,9 +181,11 @@ async fn dispatch_batch(
             && let Some(cached) = context.cache.get(key).await
         {
             outcome.cache_hits += 1;
-            outcome
-                .events
-                .push(TraceEvent::new(&member.node, &spec.tool, TraceStatus::CacheHit));
+            outcome.events.push(TraceEvent::new(
+                &member.node,
+                &spec.tool,
+                TraceStatus::CacheHit,
+            ));
             outcome
                 .results
                 .push((member.node, cached.as_ref().clone()).into_ok());
@@ -277,9 +283,11 @@ async fn dispatch_fan_out(
     outcome: &mut DispatchOutcome,
 ) {
     let items = member.items.clone().unwrap_or_default();
-    outcome
-        .events
-        .push(TraceEvent::new(&member.node, &spec.tool, TraceStatus::Started));
+    outcome.events.push(TraceEvent::new(
+        &member.node,
+        &spec.tool,
+        TraceStatus::Started,
+    ));
     let started = Instant::now();
 
     let mut item_inputs = Vec::with_capacity(items.len());
@@ -314,11 +322,27 @@ async fn dispatch_fan_out(
     }
 
     let run = if member.batchable && pending.len() > 1 {
-        run_fan_out_batched(context, spec, &member, &item_inputs, &pending, &mut results, outcome)
-            .await
+        run_fan_out_batched(
+            context,
+            spec,
+            &member,
+            &item_inputs,
+            &pending,
+            &mut results,
+            outcome,
+        )
+        .await
     } else {
-        run_fan_out_sequential(context, spec, &member, &item_inputs, &pending, &mut results, outcome)
-            .await
+        run_fan_out_sequential(
+            context,
+            spec,
+            &member,
+            &item_inputs,
+            &pending,
+            &mut results,
+            outcome,
+        )
+        .await
     };
     if let Err(error) = run {
         fail_fan_out(&member, spec, error, started, outcome);

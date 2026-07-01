@@ -386,7 +386,10 @@ mod tests {
             panic!("expected run command");
         };
         let config = run.config();
-        assert_eq!(config.result_mode, tool_compiler_runtime::ResultMode::Compact);
+        assert_eq!(
+            config.result_mode,
+            tool_compiler_runtime::ResultMode::Compact
+        );
         assert_eq!(config.on_error, ErrorMode::Continue);
         assert_eq!(config.default_timeout_ms, Some(5000));
     }

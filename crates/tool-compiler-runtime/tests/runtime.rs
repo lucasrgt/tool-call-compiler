@@ -155,10 +155,7 @@ async fn continue_mode_runs_independent_branches_after_a_failure() {
     plan.nodes.push(after);
 
     let result = runtime_with(counters)
-        .run_with(
-            plan,
-            RunConfig::new().with_on_error(ErrorMode::Continue),
-        )
+        .run_with(plan, RunConfig::new().with_on_error(ErrorMode::Continue))
         .await
         .unwrap();
 
@@ -243,10 +240,8 @@ async fn per_tool_limits_do_not_throttle_other_tools() {
             .push(Node::new(id, "free").with_input(json!({ "id": id })));
     }
 
-    let runtime = Runtime::single_adapter(
-        "test",
-        TestExecutor::new(counters.clone()).with_sleep(40),
-    );
+    let runtime =
+        Runtime::single_adapter("test", TestExecutor::new(counters.clone()).with_sleep(40));
     runtime.run(plan).await.unwrap();
 
     // The two "free" calls plus at most one "limited" call may overlap: with
@@ -267,10 +262,8 @@ async fn global_limit_caps_all_dispatches() {
             .push(Node::new(format!("n{index}"), "echo").with_input(json!({ "i": index })));
     }
 
-    let runtime = Runtime::single_adapter(
-        "test",
-        TestExecutor::new(counters.clone()).with_sleep(20),
-    );
+    let runtime =
+        Runtime::single_adapter("test", TestExecutor::new(counters.clone()).with_sleep(20));
     runtime
         .run_with(plan, RunConfig::new().with_max_concurrency(2))
         .await
@@ -346,9 +339,10 @@ async fn when_conditions_skip_nodes_and_data_dependents() {
             .with_input(json!({ "v": 1 }))
             .with_when(When::truthy(ValueRef::new("gate", ["open"]))),
     );
-    plan.nodes.push(Node::new("consumer", "echo").with_input(json!({
-        "from": { "$ref": "guarded.output" }
-    })));
+    plan.nodes
+        .push(Node::new("consumer", "echo").with_input(json!({
+            "from": { "$ref": "guarded.output" }
+        })));
     let mut ordered = Node::new("ordered", "echo").with_input(json!({ "v": 2 }));
     ordered.depends_on = vec!["guarded".into()];
     plan.nodes.push(ordered);
@@ -383,7 +377,8 @@ async fn for_each_expands_arrays_and_batches() {
             .with_input(json!({ "path": { "$item": "path" } }))
             .with_for_each(ValueRef::new("items", ["files"])),
     );
-    plan.outputs.insert("reads".into(), ValueRef::output("reads"));
+    plan.outputs
+        .insert("reads".into(), ValueRef::output("reads"));
 
     let result = runtime_with(counters.clone()).run(plan).await.unwrap();
 
@@ -413,10 +408,8 @@ async fn retries_follow_declared_policy() {
     plan.nodes
         .push(Node::new("call", "flaky").with_input(json!({ "v": 1 })));
 
-    let runtime = Runtime::single_adapter(
-        "test",
-        TestExecutor::new(counters.clone()).failing_first(2),
-    );
+    let runtime =
+        Runtime::single_adapter("test", TestExecutor::new(counters.clone()).failing_first(2));
     let result = runtime.run(plan).await.unwrap();
 
     assert_eq!(result.status, RunStatus::Success);
@@ -440,10 +433,7 @@ async fn timeouts_fail_slow_calls() {
         .insert("slow".into(), ToolSpec::new("test").with_effects(effects));
     plan.nodes.push(Node::new("call", "slow"));
 
-    let runtime = Runtime::single_adapter(
-        "test",
-        TestExecutor::new(counters).with_sleep(200),
-    );
+    let runtime = Runtime::single_adapter("test", TestExecutor::new(counters).with_sleep(200));
     let result = runtime.run(plan).await.unwrap();
 
     assert_eq!(result.status, RunStatus::Failed);
@@ -462,10 +452,7 @@ async fn blocked_tools_fail_without_dispatch() {
 
     let result = Runtime::from_registry(registry).run(plan).await.unwrap();
 
-    assert_eq!(
-        result.errors["call"].code.as_deref(),
-        Some("blocked_tool")
-    );
+    assert_eq!(result.errors["call"].code.as_deref(), Some("blocked_tool"));
     assert_eq!(counters.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -489,10 +476,7 @@ async fn input_schemas_gate_dispatch() {
 
     let result = Runtime::from_registry(registry).run(plan).await.unwrap();
 
-    assert_eq!(
-        result.errors["call"].code.as_deref(),
-        Some("invalid_input")
-    );
+    assert_eq!(result.errors["call"].code.as_deref(), Some("invalid_input"));
     assert_eq!(counters.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -500,8 +484,7 @@ async fn input_schemas_gate_dispatch() {
 async fn builtin_tools_are_always_available() {
     let mut plan = Plan::new();
     plan.tools.insert("echo".into(), pure_tool());
-    plan.tools
-        .insert("pick".into(), ToolSpec::new("builtin"));
+    plan.tools.insert("pick".into(), ToolSpec::new("builtin"));
     plan.nodes
         .push(Node::new("data", "echo").with_input(json!({ "user": { "name": "Ada" } })));
     plan.nodes.push(Node::new("name", "pick").with_input(json!({
@@ -519,10 +502,11 @@ async fn builtin_tools_are_always_available() {
 async fn compact_mode_redaction_and_truncation_shape_the_result() {
     let mut plan = Plan::new();
     plan.tools.insert("echo".into(), pure_tool());
-    plan.nodes.push(Node::new("secret", "echo").with_input(json!({
-        "api_key": "s3cr3t",
-        "content": "x"
-    })));
+    plan.nodes
+        .push(Node::new("secret", "echo").with_input(json!({
+            "api_key": "s3cr3t",
+            "content": "x"
+        })));
     plan.nodes
         .push(Node::new("big", "echo").with_input(json!({ "content": "y".repeat(4096) })));
     plan.outputs
@@ -560,10 +544,7 @@ async fn cancellation_returns_partial_results() {
     plan.nodes.push(second);
 
     let cancel = tokio_util::sync::CancellationToken::new();
-    let runtime = Runtime::single_adapter(
-        "test",
-        TestExecutor::new(counters).with_sleep(30),
-    );
+    let runtime = Runtime::single_adapter("test", TestExecutor::new(counters).with_sleep(30));
     let handle = {
         let cancel = cancel.clone();
         tokio::spawn(async move {
@@ -645,10 +626,8 @@ async fn single_flight_coalesces_concurrent_identical_calls() {
     plan.nodes
         .push(Node::new("read", "read").with_input(json!({ "q": 1 })));
 
-    let runtime = Runtime::single_adapter(
-        "test",
-        TestExecutor::new(counters.clone()).with_sleep(30),
-    );
+    let runtime =
+        Runtime::single_adapter("test", TestExecutor::new(counters.clone()).with_sleep(30));
     let (first, second) = tokio::join!(runtime.run(plan.clone()), runtime.run(plan));
     first.unwrap();
     second.unwrap();

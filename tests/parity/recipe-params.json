@@ -21,9 +21,7 @@
     "tools": {
       "search": { "adapter": "local" }
     },
-    "nodes": [
-      { "id": "q_1", "tool": "search", "input": { "q": "hello world" } }
-    ],
+    "nodes": [{ "id": "q_1", "tool": "search", "input": { "q": "hello world" } }],
     "outputs": {}
   }
 }

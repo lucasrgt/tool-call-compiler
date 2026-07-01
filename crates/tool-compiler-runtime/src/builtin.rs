@@ -86,10 +86,10 @@ fn merge(input: &Value) -> Result<Value, ToolExecutionError> {
     let mut merged = serde_json::Map::new();
     for object in objects {
         let Value::Object(map) = object else {
-            return Err(
-                ToolExecutionError::new("merge: every element of 'objects' must be an object")
-                    .with_code("invalid_input"),
-            );
+            return Err(ToolExecutionError::new(
+                "merge: every element of 'objects' must be an object",
+            )
+            .with_code("invalid_input"));
         };
         for (key, value) in map {
             merged.insert(key.clone(), value.clone());

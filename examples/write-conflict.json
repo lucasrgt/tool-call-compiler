@@ -4,9 +4,7 @@
     "write": {
       "adapter": "local",
       "effects": {
-        "writes": [
-          "db:user"
-        ],
+        "writes": ["db:user"],
         "idempotent": false,
         "cacheable": false
       }
@@ -34,4 +32,3 @@
     "last": "write_b.output"
   }
 }
-

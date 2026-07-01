@@ -97,8 +97,8 @@ impl ResolvedEffects {
             return true;
         }
 
-        let write_read_race = !self.writes.is_disjoint(&other.reads)
-            || !other.writes.is_disjoint(&self.reads);
+        let write_read_race =
+            !self.writes.is_disjoint(&other.reads) || !other.writes.is_disjoint(&self.reads);
         if write_read_race {
             return false;
         }
@@ -547,11 +547,7 @@ mod tests {
 
         let graph = validate(&plan).unwrap();
 
-        assert!(
-            graph.resolved_effects()["a"]
-                .writes
-                .contains("file:a.txt")
-        );
+        assert!(graph.resolved_effects()["a"].writes.contains("file:a.txt"));
         // a and b write different files and may share a layer; c conflicts with a.
         assert_eq!(graph.layers()[0], vec!["a".to_owned(), "b".to_owned()]);
         assert_eq!(graph.layers()[1], vec!["c".to_owned()]);
@@ -607,10 +603,7 @@ mod tests {
         let mut plan = plan_with_tools();
         plan.nodes.push(Node::new("a.b", "read_user"));
 
-        assert!(matches!(
-            validate(&plan),
-            Err(GraphError::InvalidNodeId(_))
-        ));
+        assert!(matches!(validate(&plan), Err(GraphError::InvalidNodeId(_))));
     }
 
     #[test]

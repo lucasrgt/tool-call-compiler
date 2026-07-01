@@ -332,10 +332,7 @@ fn substitute_params(
     Ok(serde_json::from_value(substituted).expect("substitution preserves the recipe shape"))
 }
 
-fn substitute_value(
-    value: Value,
-    params: &BTreeMap<String, Value>,
-) -> Result<Value, PlannerError> {
+fn substitute_value(value: Value, params: &BTreeMap<String, Value>) -> Result<Value, PlannerError> {
     match value {
         Value::Object(map) => {
             if map.len() == 1
@@ -399,8 +396,7 @@ mod tests {
     #[test]
     fn compiles_dynamic_fan_out_to_for_each() {
         let mut recipe = RecipePlan::new(Recipe::FanOut(
-            FanOutRecipe::over_ref("echo", ValueRef::new("search", ["hits"]))
-                .with_input_key("doc"),
+            FanOutRecipe::over_ref("echo", ValueRef::new("search", ["hits"])).with_input_key("doc"),
         ));
         recipe.tools = echo_tools();
 
@@ -483,19 +479,18 @@ mod tests {
         let defaulted = compile_recipe(recipe.clone()).unwrap();
         assert_eq!(defaulted.nodes[0].input, json!({ "q": "default" }));
 
-        let supplied = compile_recipe_with_params(
-            recipe,
-            [("query".to_owned(), json!("override"))].into(),
-        )
-        .unwrap();
+        let supplied =
+            compile_recipe_with_params(recipe, [("query".to_owned(), json!("override"))].into())
+                .unwrap();
         assert_eq!(supplied.nodes[0].input, json!({ "q": "override" }));
     }
 
     #[test]
     fn required_params_must_be_supplied() {
-        let mut recipe = RecipePlan::new(Recipe::FanOut(
-            FanOutRecipe::new("echo", [json!({ "$param": "query" })]),
-        ));
+        let mut recipe = RecipePlan::new(Recipe::FanOut(FanOutRecipe::new(
+            "echo",
+            [json!({ "$param": "query" })],
+        )));
         recipe.params.insert("query".into(), Value::Null);
 
         assert_eq!(
@@ -503,11 +498,8 @@ mod tests {
             PlannerError::MissingParam("query".into())
         );
         assert_eq!(
-            compile_recipe_with_params(
-                recipe,
-                [("other".to_owned(), json!(1))].into()
-            )
-            .unwrap_err(),
+            compile_recipe_with_params(recipe, [("other".to_owned(), json!(1))].into())
+                .unwrap_err(),
             PlannerError::UnknownParam("other".into())
         );
     }

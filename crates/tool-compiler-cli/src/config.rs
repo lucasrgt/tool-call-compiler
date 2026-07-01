@@ -142,8 +142,7 @@ pub async fn configured_runtime(config_path: Option<PathBuf>) -> Result<Runtime,
                     CliError::config(&path, format!("hydrating '{}': {error}", server.adapter))
                 })?;
             for capability in derived {
-                let mut capabilities =
-                    ToolCapabilities::new().with_effects(capability.effects);
+                let mut capabilities = ToolCapabilities::new().with_effects(capability.effects);
                 if let Some(schema) = capability.input_schema {
                     capabilities = capabilities.with_input_schema(schema);
                 }
@@ -190,9 +189,9 @@ pub async fn configured_runtime(config_path: Option<PathBuf>) -> Result<Runtime,
 
     for http in config.http {
         let mut client = match http.timeout_ms {
-            Some(timeout) => ReqwestHttpClient::with_timeout(std::time::Duration::from_millis(
-                timeout,
-            )),
+            Some(timeout) => {
+                ReqwestHttpClient::with_timeout(std::time::Duration::from_millis(timeout))
+            }
             None => ReqwestHttpClient::new(),
         }
         .map_err(|error| CliError::config(&path, error.to_string()))?;

@@ -57,8 +57,7 @@ pub fn explain_parallel_boundaries(plan: &Plan, graph: &ExecutionGraph) -> Vec<D
                 continue;
             }
 
-            let (Some(left_fx), Some(right_fx)) =
-                (effects.get(&left.id), effects.get(&right.id))
+            let (Some(left_fx), Some(right_fx)) = (effects.get(&left.id), effects.get(&right.id))
             else {
                 continue;
             };
@@ -122,12 +121,8 @@ fn layer_index(graph: &ExecutionGraph) -> BTreeMap<NodeId, usize> {
 }
 
 fn is_ordered(ancestors: &BTreeMap<NodeId, BTreeSet<NodeId>>, left: &str, right: &str) -> bool {
-    ancestors
-        .get(left)
-        .is_some_and(|set| set.contains(right))
-        || ancestors
-            .get(right)
-            .is_some_and(|set| set.contains(left))
+    ancestors.get(left).is_some_and(|set| set.contains(right))
+        || ancestors.get(right).is_some_and(|set| set.contains(left))
 }
 
 /// Full transitive ancestor sets, computed iteratively in topological order

@@ -13,9 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tool_compiler_graph::{ExecutionGraph, GraphError, validate};
-use tool_compiler_ir::{
-    LITERAL_KEY, Node, NodeId, Plan, REF_KEY, ValueRef, canonical_json_string,
-};
+use tool_compiler_ir::{LITERAL_KEY, Node, NodeId, Plan, REF_KEY, ValueRef, canonical_json_string};
 
 mod cost;
 mod explain;
@@ -688,10 +686,7 @@ mod tests {
         let report = explain(plan).unwrap();
 
         assert_eq!(report.diagnostics.len(), 1);
-        assert_eq!(
-            report.diagnostics[0].kind,
-            DiagnosticKind::ResourceConflict
-        );
+        assert_eq!(report.diagnostics[0].kind, DiagnosticKind::ResourceConflict);
         assert_eq!(report.diagnostics[0].resource.as_deref(), Some("db:item"));
         assert_eq!(report.diagnostics[0].nodes, vec!["w1", "w2"]);
     }

@@ -85,7 +85,12 @@ impl McpHttpClient {
 
     async fn request(&self, id: u64, message: Value) -> Result<Value, McpClientError> {
         self.ensure_session().await?;
-        let session = self.session_id.lock().await.clone().filter(|value| !value.is_empty());
+        let session = self
+            .session_id
+            .lock()
+            .await
+            .clone()
+            .filter(|value| !value.is_empty());
         let (result, _) = self.post(message, id, session.as_deref()).await?;
         Ok(result)
     }

@@ -279,7 +279,9 @@ async fn start_session(
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let mut tail = stderr_sink.lock().unwrap_or_else(|poison| poison.into_inner());
+            let mut tail = stderr_sink
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             if tail.len() >= STDERR_TAIL_LINES {
                 tail.pop_front();
             }
@@ -326,7 +328,11 @@ async fn start_session(
     let receiver = session.register(init_id);
     session.write(initialize_request(init_id)).await?;
     let init_result = session
-        .await_response(receiver, Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS), init_id)
+        .await_response(
+            receiver,
+            Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS),
+            init_id,
+        )
         .await?;
     check_protocol_version(&init_result)?;
     session.write(initialized_notification()).await?;
@@ -427,9 +433,7 @@ fn spawn_stdio(
 
         match builder.spawn() {
             Ok(child) => return Ok(child),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                last_error = Some(error)
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => last_error = Some(error),
             Err(error) => return Err(McpClientError::Transport(error.to_string())),
         }
     }
