@@ -402,4 +402,52 @@ mod tests {
         assert!(!effects.cacheable);
         assert!(effects.declares_side_effects());
     }
+
+    #[tokio::test]
+    async fn missing_programs_and_unknown_tools_error() {
+        let missing = ShellExecutor::new()
+            .call("run", json!({ "program": "__tool_compiler_missing__" }))
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code.as_deref(), Some("io"));
+
+        let unknown = ShellExecutor::new()
+            .call("exec", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(unknown.code.as_deref(), Some("unknown_tool"));
+
+        let no_program = ShellExecutor::new()
+            .call("run", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(no_program.code.as_deref(), Some("invalid_input"));
+    }
+
+    #[tokio::test]
+    async fn per_call_cwd_joins_under_the_executor_cwd() {
+        let base = std::env::temp_dir().join(format!(
+            "tool-compiler-shell-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(base.join("sub")).unwrap();
+        std::fs::write(base.join("sub").join("marker.txt"), "here").unwrap();
+
+        let print_cwd = if cfg!(windows) {
+            json!({ "program": "cmd", "args": ["/C", "cd"], "cwd": "sub" })
+        } else {
+            json!({ "program": "pwd", "cwd": "sub" })
+        };
+        let output = ShellExecutor::new()
+            .with_cwd(&base)
+            .call("run", print_cwd)
+            .await
+            .unwrap();
+
+        assert_eq!(output["success"], true);
+        assert!(output["stdout"].as_str().unwrap().contains("sub"));
+    }
 }

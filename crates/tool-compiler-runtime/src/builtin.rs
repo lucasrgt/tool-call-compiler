@@ -182,4 +182,44 @@ mod tests {
 
         assert_eq!(error.code.as_deref(), Some("unknown_tool"));
     }
+
+    #[tokio::test]
+    async fn builtin_tools_reject_malformed_inputs() {
+        for (tool, input, code) in [
+            ("pick", json!({ "path": "x" }), "invalid_input"),
+            ("pick", json!({ "value": {} }), "invalid_input"),
+            (
+                "pick",
+                json!({ "value": { "a": 1 }, "path": "missing" }),
+                "missing_path",
+            ),
+            (
+                "pick",
+                json!({ "value": [1], "path": "not_an_index" }),
+                "missing_path",
+            ),
+            ("merge", json!({}), "invalid_input"),
+            ("merge", json!({ "objects": [1] }), "invalid_input"),
+            ("template", json!({ "values": {} }), "invalid_input"),
+            ("template", json!({ "template": "x" }), "invalid_input"),
+            (
+                "template",
+                json!({ "template": "{missing}", "values": {} }),
+                "invalid_input",
+            ),
+        ] {
+            let error = BuiltinExecutor.call(tool, input.clone()).await.unwrap_err();
+            assert_eq!(error.code.as_deref(), Some(code), "{tool} {input}");
+        }
+    }
+
+    #[tokio::test]
+    async fn pick_walks_empty_paths_to_the_whole_value() {
+        let output = BuiltinExecutor
+            .call("pick", json!({ "value": { "a": 1 }, "path": "" }))
+            .await
+            .unwrap();
+
+        assert_eq!(output, json!({ "a": 1 }));
+    }
 }

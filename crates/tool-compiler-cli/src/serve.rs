@@ -80,7 +80,21 @@ pub async fn serve(runtime: Runtime) -> Result<(), CliError> {
     });
 
     eprintln!("tool-compiler serve-mcp ready (depth {})", state.depth);
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    serve_lines(state, BufReader::new(tokio::io::stdin()), sender).await;
+    let _ = writer.await;
+    Ok(())
+}
+
+/// Reads JSON-RPC lines from `reader` until EOF, handling each request
+/// concurrently and pushing responses into `sender`.
+pub(crate) async fn serve_lines<R>(
+    state: Arc<ServeState>,
+    reader: R,
+    sender: tokio::sync::mpsc::UnboundedSender<String>,
+) where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut lines = reader.lines();
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;
@@ -95,10 +109,6 @@ pub async fn serve(runtime: Runtime) -> Result<(), CliError> {
             }
         });
     }
-
-    drop(sender);
-    let _ = writer.await;
-    Ok(())
 }
 
 /// Handles one raw input line; malformed JSON produces a parse-error
@@ -404,6 +414,39 @@ mod tests {
         let response = handle_line(&state(), "{not json").await.unwrap();
 
         assert_eq!(response["error"]["code"], -32700);
+    }
+
+    #[tokio::test]
+    async fn serve_lines_processes_a_stream_of_requests() {
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n",
+            "\n",
+            "definitely not json\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        );
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        serve_lines(
+            Arc::new(state()),
+            tokio::io::BufReader::new(input.as_bytes()),
+            sender,
+        )
+        .await;
+
+        let mut responses = Vec::new();
+        while let Some(line) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+                .await
+                .ok()
+                .flatten()
+        {
+            responses.push(serde_json::from_str::<Value>(&line).unwrap());
+        }
+
+        // One ping result + one parse error; the notification is silent.
+        assert_eq!(responses.len(), 2);
+        assert!(responses.iter().any(|r| r["result"] == json!({})));
+        assert!(responses.iter().any(|r| r["error"]["code"] == -32700));
     }
 
     #[tokio::test]

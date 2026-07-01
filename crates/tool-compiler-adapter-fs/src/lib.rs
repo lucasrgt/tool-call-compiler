@@ -463,8 +463,93 @@ mod tests {
     fn declares_tool_effects() {
         let read = read_file_tool(["file:{path}"]);
         let write = write_file_tool(["file:{path}"]);
+        let multi = write_files_tool(["file:{path}"]);
+        let list = list_dir_tool(["fs:repo"]);
 
         assert!(read.effects.unwrap().batchable);
         assert!(write.effects.unwrap().writes.contains("file:{path}"));
+        assert!(multi.effects.unwrap().idempotent);
+        assert!(list.effects.unwrap().reads.contains("fs:repo"));
+    }
+
+    #[tokio::test]
+    async fn write_files_restores_previous_content_on_mid_write_failure() {
+        let root = temp_root();
+        let executor = FsExecutor::new(&root);
+        executor
+            .call(
+                "write_file",
+                json!({ "path": "keep.txt", "content": "old" }),
+            )
+            .await
+            .unwrap();
+        // A directory at the target path makes the second write fail AFTER
+        // the first file was already written.
+        std::fs::create_dir_all(root.join("blocked.txt")).unwrap();
+
+        let error = executor
+            .call(
+                "write_files",
+                json!({ "files": [
+                    { "path": "keep.txt", "content": "new" },
+                    { "path": "blocked.txt", "content": "x" }
+                ]}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code.as_deref(), Some("write_rollback"));
+
+        let read = executor
+            .call("read_file", json!({ "path": "keep.txt" }))
+            .await
+            .unwrap();
+        assert_eq!(read["content"], "old");
+    }
+
+    #[tokio::test]
+    async fn list_dir_caps_entries_and_rejects_bad_globs() {
+        let root = temp_root();
+        let executor = FsExecutor::new(&root).with_max_entries(2);
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            executor
+                .call("write_file", json!({ "path": name, "content": "" }))
+                .await
+                .unwrap();
+        }
+
+        let list = executor.call("list_dir", json!({ "path": "" })).await;
+        // Root-relative empty path resolves to the root itself.
+        let list = match list {
+            Ok(list) => list,
+            Err(_) => executor
+                .call("list_dir", json!({ "path": "." }))
+                .await
+                .unwrap(),
+        };
+        assert_eq!(list["truncated"], true);
+        assert_eq!(list["entries"].as_array().unwrap().len(), 2);
+
+        let error = executor
+            .call("list_dir", json!({ "path": ".", "glob": "[invalid" }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code.as_deref(), Some("invalid_input"));
+    }
+
+    #[tokio::test]
+    async fn missing_fields_and_unknown_tools_error() {
+        let executor = FsExecutor::new(temp_root());
+
+        let missing = executor.call("read_file", json!({})).await.unwrap_err();
+        assert_eq!(missing.code.as_deref(), Some("invalid_input"));
+
+        let unknown = executor.call("chmod", json!({})).await.unwrap_err();
+        assert_eq!(unknown.code.as_deref(), Some("unknown_tool"));
+
+        let io = executor
+            .call("read_file", json!({ "path": "nope.txt" }))
+            .await
+            .unwrap_err();
+        assert_eq!(io.code.as_deref(), Some("io"));
     }
 }

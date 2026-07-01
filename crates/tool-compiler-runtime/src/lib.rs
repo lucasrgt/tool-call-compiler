@@ -26,6 +26,7 @@ mod cache;
 mod conformance;
 mod dispatch;
 mod engine;
+mod fanout;
 mod finish;
 mod locks;
 mod policy;

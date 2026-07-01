@@ -692,6 +692,30 @@ mod tests {
     }
 
     #[test]
+    fn explains_read_write_conflicts() {
+        let mut plan = Plan::new();
+        plan.tools.insert(
+            "read".into(),
+            ToolSpec::new("test").with_effects(Effects::read_only(["db:item"])),
+        );
+        plan.tools.insert(
+            "write".into(),
+            ToolSpec::new("test").with_effects(Effects {
+                writes: ["db:item"].into_iter().map(String::from).collect(),
+                ..Effects::default()
+            }),
+        );
+        plan.nodes.push(Node::new("r", "read"));
+        plan.nodes.push(Node::new("w", "write"));
+
+        let report = explain(plan).unwrap();
+
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(report.diagnostics[0].kind, DiagnosticKind::ResourceConflict);
+        assert_eq!(report.diagnostics[0].nodes, vec!["r", "w"]);
+    }
+
+    #[test]
     fn does_not_flag_transitively_ordered_pairs() {
         let mut plan = plan();
         // w1 -> gate -> w2: same-resource writers, but ordered through gate.

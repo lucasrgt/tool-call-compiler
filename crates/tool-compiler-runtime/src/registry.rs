@@ -255,4 +255,56 @@ mod tests {
         assert!(registry.is_blocked("run_compiled_tool_graph"));
         assert!(!registry.is_blocked("echo"));
     }
+
+    #[test]
+    fn capability_builders_layer_metadata() {
+        use tool_compiler_ir::{Effects, ToolCost, ToolLimits};
+
+        let capabilities = ToolCapabilities::new()
+            .with_effects(Effects::pure())
+            .with_limits(ToolLimits {
+                max_concurrency: Some(2),
+                batch_size: Some(4),
+            })
+            .with_cost(ToolCost {
+                fixed_ms: Some(1),
+                per_call_ms: Some(2),
+                tokens: Some(3),
+            })
+            .with_version("v9")
+            .with_input_schema(serde_json::json!({ "type": "object" }));
+
+        let registry = ToolRegistry::new().with_tool_capabilities("tool", capabilities.clone());
+
+        let stored = registry.capabilities("tool").unwrap();
+        assert_eq!(stored.version.as_deref(), Some("v9"));
+        assert_eq!(stored.limits.as_ref().unwrap().batch_size, Some(4));
+        assert_eq!(stored.cost.as_ref().unwrap().tokens, Some(3));
+        assert!(stored.input_schema.is_some());
+    }
+
+    #[test]
+    fn hydration_fills_only_missing_fields() {
+        use tool_compiler_ir::{Effects, Node, Plan, ToolSpec};
+
+        let registry = ToolRegistry::new().with_tool_capabilities(
+            "echo",
+            ToolCapabilities::new()
+                .with_effects(Effects::pure())
+                .with_version("from-registry"),
+        );
+        let mut plan = Plan::new();
+        plan.tools.insert(
+            "echo".into(),
+            ToolSpec::new("test").with_version("from-plan"),
+        );
+        plan.nodes.push(Node::new("a", "echo"));
+
+        registry.apply_capabilities(&mut plan);
+
+        let spec = &plan.tools["echo"];
+        assert!(spec.effects.as_ref().unwrap().pure);
+        // Plan-declared metadata wins over registry hydration.
+        assert_eq!(spec.version.as_deref(), Some("from-plan"));
+    }
 }

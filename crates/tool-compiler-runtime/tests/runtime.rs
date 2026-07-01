@@ -703,3 +703,354 @@ async fn custom_cache_backend_is_used() {
 
     assert_eq!(second.metrics.cache_hits, 1);
 }
+
+// --- error-path and API coverage ---
+
+struct FailingBatchExecutor;
+
+#[async_trait]
+impl ToolExecutor for FailingBatchExecutor {
+    async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
+        Ok(input)
+    }
+
+    async fn call_batch(
+        &self,
+        _tool: &str,
+        _inputs: Vec<BatchInput>,
+    ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
+        Err(ToolExecutionError::new("batch exploded"))
+    }
+}
+
+struct MissingBatchOutputExecutor;
+
+#[async_trait]
+impl ToolExecutor for MissingBatchOutputExecutor {
+    async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
+        Ok(input)
+    }
+
+    async fn call_batch(
+        &self,
+        _tool: &str,
+        inputs: Vec<BatchInput>,
+    ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
+        Ok(inputs
+            .into_iter()
+            .skip(1)
+            .map(|input| BatchOutput {
+                node: input.node,
+                output: input.input,
+            })
+            .collect())
+    }
+}
+
+fn batchable_plan() -> Plan {
+    let mut plan = Plan::new();
+    plan.tools.insert(
+        "echo".into(),
+        ToolSpec::new("test").with_effects(Effects {
+            batchable: true,
+            ..Effects::pure()
+        }),
+    );
+    plan.nodes
+        .push(Node::new("a", "echo").with_input(json!({ "id": "a" })));
+    plan.nodes
+        .push(Node::new("b", "echo").with_input(json!({ "id": "b" })));
+    plan
+}
+
+#[tokio::test]
+async fn batch_failures_mark_every_member_failed() {
+    let result = Runtime::single_adapter("test", FailingBatchExecutor)
+        .run(batchable_plan())
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert!(result.errors.contains_key("a"));
+    assert!(result.errors.contains_key("b"));
+}
+
+#[tokio::test]
+async fn missing_batch_outputs_fail_only_the_missing_member() {
+    let result = Runtime::single_adapter("test", MissingBatchOutputExecutor)
+        .run(batchable_plan())
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(
+        result.errors["a"].code.as_deref(),
+        Some("batch_missing_output")
+    );
+    assert_eq!(result.node_outputs["b"], json!({ "id": "b" }));
+}
+
+#[tokio::test]
+async fn cached_batch_members_skip_the_second_dispatch() {
+    let counters: Arc<Counters> = Default::default();
+    let runtime = Runtime::single_adapter("test", TestExecutor::new(counters.clone()));
+
+    runtime.run(batchable_plan()).await.unwrap();
+    let second = runtime.run(batchable_plan()).await.unwrap();
+
+    assert_eq!(counters.batches.load(Ordering::SeqCst), 1);
+    assert_eq!(second.metrics.cache_hits, 2);
+}
+
+#[tokio::test]
+async fn for_each_runs_sequentially_for_non_batchable_tools() {
+    let counters: Arc<Counters> = Default::default();
+    let mut plan = Plan::new();
+    plan.tools.insert("echo".into(), pure_tool());
+    plan.tools.insert(
+        "notify".into(),
+        ToolSpec::new("test").with_effects(Effects {
+            writes: ["notify:{target}"].into_iter().map(String::from).collect(),
+            idempotent: true,
+            ..Effects::default()
+        }),
+    );
+    plan.nodes
+        .push(Node::new("items", "echo").with_input(json!({ "targets": ["a", "b", "c"] })));
+    plan.nodes.push(
+        Node::new("send", "notify")
+            .with_input(json!({ "target": { "$item": "" } }))
+            .with_for_each(ValueRef::new("items", ["targets"])),
+    );
+    plan.outputs.insert("send".into(), ValueRef::output("send"));
+
+    let result = runtime_with(counters.clone()).run(plan).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Success);
+    assert_eq!(counters.calls.load(Ordering::SeqCst), 4); // items + 3 sends
+    assert_eq!(
+        result.outputs["send"],
+        json!([{ "target": "a" }, { "target": "b" }, { "target": "c" }])
+    );
+}
+
+#[tokio::test]
+async fn for_each_item_errors_fail_the_node() {
+    let mut plan = Plan::new();
+    plan.tools.insert("echo".into(), pure_tool());
+    plan.tools.insert("fail".into(), pure_tool());
+    plan.nodes
+        .push(Node::new("items", "echo").with_input(json!({ "targets": [1, 2] })));
+    plan.nodes.push(
+        Node::new("bad", "fail")
+            .with_input(json!({ "target": { "$item": "" } }))
+            .with_for_each(ValueRef::new("items", ["targets"])),
+    );
+
+    let result = runtime_with(Default::default()).run(plan).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert!(result.errors.contains_key("bad"));
+}
+
+#[tokio::test]
+async fn for_each_over_non_arrays_is_an_error() {
+    let mut plan = Plan::new();
+    plan.tools.insert("echo".into(), pure_tool());
+    plan.nodes
+        .push(Node::new("items", "echo").with_input(json!({ "targets": 42 })));
+    plan.nodes.push(
+        Node::new("bad", "echo")
+            .with_input(json!({ "t": { "$item": "" } }))
+            .with_for_each(ValueRef::new("items", ["targets"])),
+    );
+
+    let result = runtime_with(Default::default()).run(plan).await.unwrap();
+
+    assert_eq!(
+        result.errors["bad"].code.as_deref(),
+        Some("invalid_for_each")
+    );
+}
+
+#[tokio::test]
+async fn for_each_missing_item_paths_fail_the_node() {
+    let mut plan = Plan::new();
+    plan.tools.insert("echo".into(), pure_tool());
+    plan.nodes
+        .push(Node::new("items", "echo").with_input(json!({ "targets": [{ "x": 1 }] })));
+    plan.nodes.push(
+        Node::new("bad", "echo")
+            .with_input(json!({ "t": { "$item": "missing.path" } }))
+            .with_for_each(ValueRef::new("items", ["targets"])),
+    );
+
+    let result = runtime_with(Default::default()).run(plan).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert!(result.errors.contains_key("bad"));
+}
+
+#[tokio::test]
+async fn when_supports_equals_and_negation() {
+    let mut plan = Plan::new();
+    plan.tools.insert("echo".into(), pure_tool());
+    plan.nodes
+        .push(Node::new("gate", "echo").with_input(json!({ "mode": "off" })));
+    plan.nodes.push(
+        Node::new("on_off", "echo")
+            .with_input(json!({ "v": 1 }))
+            .with_when(When::equals(ValueRef::new("gate", ["mode"]), json!("off"))),
+    );
+    plan.nodes.push(
+        Node::new("negated", "echo")
+            .with_input(json!({ "v": 2 }))
+            .with_when(When::truthy(ValueRef::new("gate", ["mode"])).negated()),
+    );
+
+    let result = runtime_with(Default::default()).run(plan).await.unwrap();
+
+    assert_eq!(result.node_outputs["on_off"], json!({ "v": 1 }));
+    assert_eq!(result.skipped["negated"], SkipReason::Condition);
+}
+
+#[tokio::test]
+async fn when_resolution_errors_fail_the_node() {
+    let mut plan = Plan::new();
+    plan.tools.insert("echo".into(), pure_tool());
+    plan.nodes
+        .push(Node::new("gate", "echo").with_input(json!({ "mode": "on" })));
+    plan.nodes.push(
+        Node::new("bad", "echo")
+            .with_when(When::truthy(ValueRef::new("gate", ["missing", "path"]))),
+    );
+
+    let result = runtime_with(Default::default()).run(plan).await.unwrap();
+
+    assert_eq!(result.errors["bad"].code.as_deref(), Some("missing_path"));
+}
+
+#[tokio::test]
+async fn unresolved_declared_outputs_are_reported() {
+    let mut plan = Plan::new();
+    plan.tools.insert("echo".into(), pure_tool());
+    plan.nodes
+        .push(Node::new("a", "echo").with_input(json!({ "v": 1 })));
+    plan.outputs
+        .insert("bad".into(), ValueRef::new("a", ["missing"]));
+
+    let result = runtime_with(Default::default()).run(plan).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Failed);
+    assert_eq!(
+        result.errors["outputs.bad"].code.as_deref(),
+        Some("unresolved_output")
+    );
+}
+
+#[tokio::test]
+async fn run_unoptimized_parallelizes_without_passes() {
+    let counters: Arc<Counters> = Default::default();
+    let mut plan = Plan::new();
+    plan.tools.insert("echo".into(), pure_tool());
+    plan.nodes
+        .push(Node::new("a", "echo").with_input(json!({ "q": 1 })));
+    plan.nodes
+        .push(Node::new("b", "echo").with_input(json!({ "q": 1 })));
+
+    let result = runtime_with(counters.clone())
+        .run_unoptimized(plan, RunConfig::new().with_cache(false))
+        .await
+        .unwrap();
+
+    // No dedup pass: both identical nodes execute.
+    assert_eq!(counters.calls.load(Ordering::SeqCst), 2);
+    assert!(result.optimization.passes.is_empty());
+}
+
+#[tokio::test]
+async fn resolve_output_ref_helper_walks_node_outputs() {
+    let mut outputs = std::collections::BTreeMap::new();
+    outputs.insert("a".to_owned(), json!({ "items": [{ "id": 7 }] }));
+
+    let value = tool_compiler_runtime::resolve_output_ref(
+        &ValueRef::new("a", ["items", "0", "id"]),
+        &outputs,
+    )
+    .unwrap();
+    assert_eq!(value, json!(7));
+
+    let missing = tool_compiler_runtime::resolve_output_ref(&ValueRef::output("nope"), &outputs);
+    assert!(missing.is_err());
+}
+
+#[tokio::test]
+async fn prepared_plan_exposes_the_optimized_view() {
+    let mut plan = Plan::new().with_name("prepared");
+    plan.tools.insert("echo".into(), pure_tool());
+    plan.nodes
+        .push(Node::new("a", "echo").with_input(json!({ "q": 1 })));
+
+    let runtime = runtime_with(Default::default());
+    let prepared = runtime.prepare(plan).unwrap();
+
+    assert_eq!(prepared.plan().name.as_deref(), Some("prepared"));
+    assert_eq!(prepared.report().passes, vec!["dedup", "dce", "batch"]);
+}
+
+#[tokio::test]
+async fn conformance_reports_failures_precisely() {
+    struct WrongEcho;
+    #[async_trait]
+    impl ToolExecutor for WrongEcho {
+        async fn call(&self, _tool: &str, _input: Value) -> Result<Value, ToolExecutionError> {
+            Ok(json!({ "wrong": true }))
+        }
+    }
+    let wrong = check_adapter_conformance_with(
+        "wrong",
+        WrongEcho,
+        ConformanceOptions::new().with_failing_tool("fail"),
+    )
+    .await;
+    assert!(!wrong.passed);
+    assert!(wrong.checks.iter().any(|check| !check.passed));
+
+    struct AlwaysOk;
+    #[async_trait]
+    impl ToolExecutor for AlwaysOk {
+        async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
+            Ok(input)
+        }
+    }
+    let no_error = check_adapter_conformance_with(
+        "ok",
+        AlwaysOk,
+        ConformanceOptions::new().with_failing_tool("fail"),
+    )
+    .await;
+    assert!(
+        no_error
+            .checks
+            .iter()
+            .any(|check| check.name == "error_propagation" && !check.passed)
+    );
+
+    struct BrokenBatch;
+    #[async_trait]
+    impl ToolExecutor for BrokenBatch {
+        async fn call(&self, _tool: &str, input: Value) -> Result<Value, ToolExecutionError> {
+            Ok(input)
+        }
+        async fn call_batch(
+            &self,
+            _tool: &str,
+            _inputs: Vec<BatchInput>,
+        ) -> Result<Vec<BatchOutput>, ToolExecutionError> {
+            Ok(Vec::new())
+        }
+    }
+    let broken =
+        check_adapter_conformance_with("broken", BrokenBatch, ConformanceOptions::new()).await;
+    assert!(!broken.passed);
+}

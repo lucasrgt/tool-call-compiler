@@ -303,6 +303,82 @@ rl.on('line', line => {
 });
 "#;
 
+#[tokio::test]
+async fn stdio_client_survives_noise_and_server_requests() {
+    // The server emits non-JSON noise and a server-to-client REQUEST before
+    // answering; both must be handled without corrupting the call.
+    let script = r#"
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', line => {
+  const req = JSON.parse(line);
+  if (req.method === 'initialize') {
+    console.log(JSON.stringify({
+      jsonrpc: '2.0', id: req.id,
+      result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fake', version: '0.1.0' } }
+    }));
+  } else if (req.method === 'tools/call') {
+    console.log('plain text noise that is not json');
+    console.log(JSON.stringify({ jsonrpc: '2.0', id: 999999, method: 'sampling/createMessage', params: {} }));
+    console.log(JSON.stringify({
+      jsonrpc: '2.0', id: req.id,
+      result: { structuredContent: { ok: true }, content: [], isError: false }
+    }));
+  }
+});
+"#;
+    let client = McpStdioClient::new(stdio_config(script));
+
+    let result = client.call_tool("echo", json!({})).await.unwrap();
+
+    assert_eq!(result["structuredContent"]["ok"], true);
+}
+
+#[tokio::test]
+async fn stdio_client_times_out_slow_tools_without_killing_the_session() {
+    let script = r#"
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', line => {
+  const req = JSON.parse(line);
+  if (req.method === 'initialize') {
+    console.log(JSON.stringify({
+      jsonrpc: '2.0', id: req.id,
+      result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fake', version: '0.1.0' } }
+    }));
+  } else if (req.method === 'tools/call') {
+    if (req.params.name === 'slow') { return; }
+    console.log(JSON.stringify({
+      jsonrpc: '2.0', id: req.id,
+      result: { structuredContent: { pid: process.pid }, content: [], isError: false }
+    }));
+  }
+});
+"#;
+    let mut config = stdio_config(script);
+    config.request_timeout_ms = Some(300);
+    let client = McpStdioClient::new(config);
+
+    let error = client.call_tool("slow", json!({})).await.unwrap_err();
+    assert!(matches!(error, McpClientError::Timeout(_)));
+
+    // One slow tool is not a dead server: the session stays alive.
+    let ok = client.call_tool("echo", json!({})).await.unwrap();
+    assert!(ok["structuredContent"]["pid"].is_number());
+}
+
+#[tokio::test]
+async fn stdio_client_shuts_down_gracefully() {
+    let client = McpStdioClient::new(stdio_config(FAKE_SERVER));
+    client.call_tool("echo", json!({})).await.unwrap();
+
+    client.shutdown().await;
+
+    // A fresh call respawns a new server after shutdown.
+    let after = client.call_tool("echo", json!({})).await.unwrap();
+    assert!(after["structuredContent"]["pid"].is_number());
+}
+
 const LISTING_SERVER: &str = r#"
 const readline = require('readline');
 const rl = readline.createInterface({ input: process.stdin });

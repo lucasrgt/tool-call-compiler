@@ -368,6 +368,117 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<(), CliError> {
 mod tests {
     use super::*;
 
+    fn example(name: &str) -> String {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join(name)
+            .display()
+            .to_string()
+    }
+
+    async fn run_cli(args: &[&str]) -> Result<(), CliError> {
+        let mut full = vec!["tool-compiler"];
+        full.extend_from_slice(args);
+        execute(Cli::parse_from(full)).await
+    }
+
+    #[tokio::test]
+    async fn inspection_commands_run_against_the_examples() {
+        run_cli(&["validate", &example("sequential-ref.json")])
+            .await
+            .unwrap();
+        run_cli(&["layers", &example("parallel-safe.json")])
+            .await
+            .unwrap();
+        run_cli(&["optimize", &example("dedupe.json")])
+            .await
+            .unwrap();
+        run_cli(&["explain", &example("write-conflict.json")])
+            .await
+            .unwrap();
+        run_cli(&[
+            "compile-intent",
+            &example("dogfood-aerofortress-intent.json"),
+        ])
+        .await
+        .unwrap();
+        run_cli(&["compile-recipe", &example("recipe-fanout.json")])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn execution_commands_run_against_the_examples() {
+        run_cli(&[
+            "run",
+            &example("sequential-ref.json"),
+            "--result-mode",
+            "compact",
+        ])
+        .await
+        .unwrap();
+        run_cli(&["run-intent", &example("dogfood-aerofortress-intent.json")])
+            .await
+            .unwrap();
+        run_cli(&["run-recipe", &example("recipe-fanout.json")])
+            .await
+            .unwrap();
+        run_cli(&[
+            "bench",
+            &example("dedupe.json"),
+            "--iterations",
+            "1",
+            "--warmup",
+            "0",
+        ])
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn conformance_and_suggest_commands_work() {
+        run_cli(&[
+            "conformance",
+            "local",
+            "--echo-tool",
+            "echo",
+            "--failing-tool",
+            "fail",
+        ])
+        .await
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "tool-compiler-suggest-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let calls = dir.join("calls.json");
+        std::fs::write(
+            &calls,
+            r#"[
+                {"tool": "read_file", "input": {"path": "a.md"}},
+                {"tool": "read_file", "input": {"path": "b.md"}},
+                {"tool": "read_file", "input": {"path": "c.md"}}
+            ]"#,
+        )
+        .unwrap();
+        run_cli(&["suggest", calls.to_str().unwrap(), "--min-occurrences", "3"])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn conformance_failures_exit_with_an_error() {
+        let error = run_cli(&["conformance", "missing-adapter"]).await;
+        assert!(error.is_err());
+    }
+
     #[test]
     fn cli_parses_run_flags() {
         let cli = Cli::parse_from([

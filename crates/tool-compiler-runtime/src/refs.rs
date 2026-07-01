@@ -151,4 +151,57 @@ mod tests {
 
         assert!(substitute_item(&template, &json!({})).is_err());
     }
+
+    #[test]
+    fn non_string_item_markers_error() {
+        let template = json!({ "x": { "$item": 5 } });
+
+        assert!(substitute_item(&template, &json!({})).is_err());
+    }
+
+    #[test]
+    fn item_substitution_preserves_literals_and_arrays() {
+        let template = json!({
+            "keep": { "$literal": { "$item": "raw" } },
+            "list": [{ "$item": "id" }, 7]
+        });
+        let item = json!({ "id": 3 });
+
+        let resolved = substitute_item(&template, &item).unwrap();
+
+        assert_eq!(resolved["keep"], json!({ "$literal": { "$item": "raw" } }));
+        assert_eq!(resolved["list"], json!([3, 7]));
+    }
+
+    #[test]
+    fn resolve_input_walks_arrays_and_scalars() {
+        let mut outputs = BTreeMap::new();
+        outputs.insert("a".to_owned(), json!({ "items": ["x", "y"] }));
+
+        let resolved = resolve_input(
+            &json!([{ "$ref": "a.output.items.1" }, 5, "text"]),
+            &outputs,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, json!(["y", 5, "text"]));
+    }
+
+    #[test]
+    fn resolve_value_ref_reports_missing_indexes_and_scalars() {
+        let mut outputs = BTreeMap::new();
+        outputs.insert("a".to_owned(), json!({ "items": ["x"], "n": 5 }));
+
+        assert!(resolve_value_ref(&ValueRef::new("a", ["items", "9"]), &outputs).is_err());
+        assert!(resolve_value_ref(&ValueRef::new("a", ["items", "x"]), &outputs).is_err());
+        assert!(resolve_value_ref(&ValueRef::new("a", ["n", "deep"]), &outputs).is_err());
+        assert!(resolve_value_ref(&ValueRef::output("missing"), &outputs).is_err());
+    }
+
+    #[test]
+    fn resolve_input_rejects_malformed_refs() {
+        let error = resolve_input(&json!({ "$ref": "not-a-ref" }), &BTreeMap::new()).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::InvalidRef(_)));
+    }
 }

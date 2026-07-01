@@ -239,6 +239,163 @@ pub fn parse_params(raw: &[String]) -> Result<BTreeMap<String, Value>, CliError>
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn builds_a_runtime_from_every_binding_kind() {
+        let config = serde_json::json!({
+            "mcp": [{
+                "adapter": "mcp.files",
+                "name": "files",
+                "command": "node",
+                "args": ["-e", "process.exit(0)"],
+                "env_clear": true,
+                "inherit": ["PATH"],
+                "request_timeout_ms": 5000
+            }],
+            "fs": [{ "adapter": "fs.repo", "root": ".", "max_read_bytes": 1024, "max_entries": 10 }],
+            "shell": [{
+                "adapter": "shell.local",
+                "cwd": ".",
+                "env": { "X": "1" },
+                "env_clear": true,
+                "inherit": ["PATH"],
+                "default_timeout_ms": 1000,
+                "max_output_bytes": 4096
+            }],
+            "http": [{
+                "adapter": "http.api",
+                "base_url": "https://example.test",
+                "default_headers": { "authorization": "Bearer x" },
+                "timeout_ms": 2000
+            }],
+            "capabilities": [
+                { "tool": "read_file", "effects": { "pure": true } },
+                { "tool": "read_file", "adapter": "fs.repo", "version": "scoped" }
+            ]
+        });
+        let dir = std::env::temp_dir().join(format!(
+            "tool-compiler-config-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runtime.json");
+        std::fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+
+        let runtime = configured_runtime(Some(path)).await.unwrap();
+        let registry = runtime.registry();
+
+        for adapter in [
+            "local",
+            "builtin",
+            "mcp.files",
+            "fs.repo",
+            "shell.local",
+            "http.api",
+        ] {
+            assert!(
+                registry.executor_for(adapter).is_some(),
+                "missing {adapter}"
+            );
+        }
+        // Adapter-scoped capabilities win over the unscoped entry.
+        assert_eq!(
+            registry
+                .capabilities_for("fs.repo", "read_file")
+                .unwrap()
+                .version
+                .as_deref(),
+            Some("scoped")
+        );
+        assert!(
+            registry
+                .capabilities_for("other", "read_file")
+                .unwrap()
+                .effects
+                .is_some()
+        );
+        // The compiler's own tools are always blocked (recursion defense).
+        assert!(registry.is_blocked("run_compiled_tool_graph"));
+    }
+
+    #[tokio::test]
+    async fn hydrate_registers_capabilities_from_the_servers_tool_list() {
+        let script = r#"
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', line => {
+  const req = JSON.parse(line);
+  if (req.method === 'initialize') {
+    console.log(JSON.stringify({
+      jsonrpc: '2.0', id: req.id,
+      result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fake', version: '0.1.0' } }
+    }));
+  } else if (req.method === 'tools/list') {
+    console.log(JSON.stringify({
+      jsonrpc: '2.0', id: req.id,
+      result: { tools: [{ name: 'lookup', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true, idempotentHint: true } }] }
+    }));
+  }
+});
+"#;
+        let config = serde_json::json!({
+            "mcp": [{
+                "adapter": "mcp.fake",
+                "name": "fake",
+                "command": "node",
+                "args": ["-e", script],
+                "hydrate": true
+            }]
+        });
+        let dir = std::env::temp_dir().join(format!(
+            "tool-compiler-hydrate-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runtime.json");
+        std::fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+
+        let runtime = configured_runtime(Some(path)).await.unwrap();
+
+        let capabilities = runtime
+            .registry()
+            .capabilities_for("mcp.fake", "lookup")
+            .expect("hydrated capabilities");
+        assert!(
+            capabilities
+                .effects
+                .as_ref()
+                .unwrap()
+                .reads
+                .contains("mcp:fake")
+        );
+        assert!(capabilities.input_schema.is_some());
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_config_fields() {
+        let dir = std::env::temp_dir().join(format!(
+            "tool-compiler-config-bad-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runtime.json");
+        std::fs::write(&path, r#"{ "mpc": [] }"#).unwrap();
+
+        let Err(error) = configured_runtime(Some(path)).await else {
+            panic!("unknown config fields must be rejected");
+        };
+
+        assert!(error.to_string().contains("mpc"));
+    }
+
     #[test]
     fn parses_params_as_json_with_string_fallback() {
         let params = parse_params(&[
