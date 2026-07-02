@@ -14,10 +14,10 @@ use crate::result::{TraceEvent, TraceStatus};
 pub(crate) async fn dispatch_fan_out(
     context: &DispatchContext,
     spec: &UnitSpec,
-    member: PreparedMember,
+    mut member: PreparedMember,
     outcome: &mut DispatchOutcome,
 ) {
-    let items = member.items.clone().unwrap_or_default();
+    let items = member.items.take().unwrap_or_default();
     outcome.events.push(TraceEvent::new(
         &member.node,
         &spec.tool,

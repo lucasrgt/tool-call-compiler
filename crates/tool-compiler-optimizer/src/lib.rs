@@ -8,7 +8,7 @@
 //! Every pass is effect-gated: a transformation only happens when the
 //! declared tool effects prove it safe.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,6 +43,11 @@ impl OptimizedPlan {
     /// What the optimizer did.
     pub fn report(&self) -> &OptimizationReport {
         &self.report
+    }
+
+    /// Decomposes into `(plan, graph, report)` without cloning.
+    pub fn into_parts(self) -> (Plan, ExecutionGraph, OptimizationReport) {
+        (self.plan, self.graph, self.report)
     }
 }
 
@@ -129,11 +134,7 @@ pub struct ExplainReport {
 
 /// Runs the optimization pipeline on `plan`.
 pub fn optimize(plan: Plan) -> Result<OptimizedPlan, GraphError> {
-    let original_nodes: Vec<(NodeId, String)> = plan
-        .nodes
-        .iter()
-        .map(|node| (node.id.clone(), node.tool.clone()))
-        .collect();
+    let original_tools: Vec<String> = plan.nodes.iter().map(|node| node.tool.clone()).collect();
 
     let mut report = OptimizationReport::default();
 
@@ -144,13 +145,17 @@ pub fn optimize(plan: Plan) -> Result<OptimizedPlan, GraphError> {
     report.passes.push("dce".into());
     let plan = eliminate_dead_nodes(plan, &graph, &mut report);
     if !report.eliminated.is_empty() {
-        graph = validate(&plan)?;
+        // Elimination only removes nodes; the survivors' dependencies and
+        // effects are untouched, so rebuilding the layers over the kept set
+        // replaces a full (input-reparsing) re-validation.
+        let kept: BTreeSet<NodeId> = plan.nodes.iter().map(|node| node.id.clone()).collect();
+        graph = graph.retain(&kept)?;
     }
 
     report.passes.push("batch".into());
     report.batch_groups = find_batch_groups(&plan, &graph);
 
-    report.summary = summarize(&original_nodes, &plan, &graph, &report);
+    report.summary = summarize(&original_tools, &plan, &graph, &report);
 
     Ok(OptimizedPlan {
         plan,
@@ -172,8 +177,8 @@ pub fn explain(plan: Plan) -> Result<ExplainReport, GraphError> {
 }
 
 fn deduplicate_nodes(mut plan: Plan, report: &mut OptimizationReport) -> Plan {
-    let mut seen = BTreeMap::<String, NodeId>::new();
-    let mut aliases = BTreeMap::<NodeId, NodeId>::new();
+    let mut seen = HashMap::<String, NodeId>::new();
+    let mut aliases = HashMap::<NodeId, NodeId>::new();
     let mut kept = Vec::new();
     let nodes = std::mem::take(&mut plan.nodes);
 
@@ -194,12 +199,16 @@ fn deduplicate_nodes(mut plan: Plan, report: &mut OptimizationReport) -> Plan {
         kept.push(node);
     }
 
+    plan.nodes = kept;
+    if aliases.is_empty() {
+        return plan;
+    }
+
     // Rewrite AFTER the alias map is complete so references to duplicates
     // that appear later in the node list are also redirected.
-    for node in &mut kept {
+    for node in &mut plan.nodes {
         rewrite_node_aliases(node, &aliases);
     }
-    plan.nodes = kept;
     for value_ref in plan.outputs.values_mut() {
         *value_ref = rewrite_value_ref(value_ref, &aliases);
     }
@@ -216,34 +225,39 @@ fn eliminate_dead_nodes(
         return plan;
     }
 
-    let mut roots = BTreeSet::<NodeId>::new();
+    // Roots and the reachability walk borrow node ids from the graph (which
+    // indexes every node), so no ids are cloned while marking.
+    let mut stack: Vec<&str> = Vec::new();
     for value_ref in plan.outputs.values() {
-        roots.insert(value_ref.node().to_owned());
+        if let Some((node, _)) = graph.dependencies().get_key_value(value_ref.node()) {
+            stack.push(node.as_str());
+        }
     }
     for (node, effects) in graph.resolved_effects() {
         if !effects.pure {
-            roots.insert(node.clone());
+            stack.push(node.as_str());
         }
     }
 
-    let mut kept = BTreeSet::new();
-    let mut stack: Vec<NodeId> = roots.into_iter().collect();
+    let mut kept = HashSet::<&str>::new();
     while let Some(node) = stack.pop() {
-        if !kept.insert(node.clone()) {
+        if !kept.insert(node) {
             continue;
         }
-        if let Some(deps) = graph.dependencies().get(&node) {
-            stack.extend(deps.iter().cloned());
+        if let Some(deps) = graph.dependencies().get(node) {
+            stack.extend(deps.iter().map(String::as_str));
         }
     }
 
     report.eliminated = plan
         .nodes
         .iter()
-        .filter(|node| !kept.contains(&node.id))
+        .filter(|node| !kept.contains(node.id.as_str()))
         .map(|node| node.id.clone())
         .collect();
-    plan.nodes.retain(|node| kept.contains(&node.id));
+    if !report.eliminated.is_empty() {
+        plan.nodes.retain(|node| kept.contains(node.id.as_str()));
+    }
     plan
 }
 
@@ -327,7 +341,7 @@ fn dedup_key(plan: &Plan, node: &Node) -> Option<String> {
     Some(key)
 }
 
-fn rewrite_node_aliases(node: &mut Node, aliases: &BTreeMap<NodeId, NodeId>) {
+fn rewrite_node_aliases(node: &mut Node, aliases: &HashMap<NodeId, NodeId>) {
     node.depends_on = node
         .depends_on
         .iter()
@@ -344,7 +358,7 @@ fn rewrite_node_aliases(node: &mut Node, aliases: &BTreeMap<NodeId, NodeId>) {
     rewrite_refs_in_value(&mut node.input, aliases);
 }
 
-fn rewrite_refs_in_value(value: &mut Value, aliases: &BTreeMap<NodeId, NodeId>) {
+fn rewrite_refs_in_value(value: &mut Value, aliases: &HashMap<NodeId, NodeId>) {
     match value {
         Value::Object(map) => {
             if map.len() == 1 && map.contains_key(LITERAL_KEY) {
@@ -374,14 +388,14 @@ fn rewrite_refs_in_value(value: &mut Value, aliases: &BTreeMap<NodeId, NodeId>) 
     }
 }
 
-fn rewrite_value_ref(value_ref: &ValueRef, aliases: &BTreeMap<NodeId, NodeId>) -> ValueRef {
+fn rewrite_value_ref(value_ref: &ValueRef, aliases: &HashMap<NodeId, NodeId>) -> ValueRef {
     ValueRef::new(
         canonical_node(value_ref.node(), aliases),
         value_ref.path().to_owned(),
     )
 }
 
-fn canonical_node(node: &str, aliases: &BTreeMap<NodeId, NodeId>) -> NodeId {
+fn canonical_node(node: &str, aliases: &HashMap<NodeId, NodeId>) -> NodeId {
     let mut current = node;
     while let Some(next) = aliases.get(current) {
         current = next;

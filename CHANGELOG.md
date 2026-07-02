@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+Algorithmic performance pass across the compile pipeline and the runtime.
+No API or behavior changes: layers, reports, traces, and results are
+byte-identical; the full suite and the serial-equivalence property tests
+gate the rewrite.
+
+- Layer construction (`safe_layers`) drops the pairwise
+  `can_run_with`-per-member scan for per-layer aggregates (read union +
+  per-resource write claims): admission is O(candidate resources) instead
+  of O(layer size), taking wide fan-outs from quadratic to near-linear
+  (5,000-node fan-out: ~1.1 s → ~7 ms compile). In-degree counters replace
+  the cloned dependency map; the per-pass `ready` clone is gone.
+- Dead-node elimination now rebuilds only membership and layers
+  (`ExecutionGraph::retain`) instead of re-running full validation — the
+  survivors' dependencies and effects cannot change — removing the second
+  input re-parse from `optimize`.
+- Deduplication skips the whole rewrite walk when no duplicates were found
+  and uses hash maps for the key/alias tables; the DCE walk borrows node
+  ids instead of cloning them; the cost model stops cloning `ToolCost` per
+  query; `canonical_json_string` escapes keys in place without cloning.
+- `explain_parallel_boundaries` replaces the all-pairs scan (three set
+  intersections per node pair) with per-resource conflict groups over
+  ancestor/descendant bitsets; cost now tracks actual conflicts.
+- `PreparedPlan` shares the plan, graph, and data dependencies as `Arc`s:
+  `prepare` no longer deep-clones the optimized plan (3×), and each
+  `run_prepared` stops deep-cloning every node input, re-parsing refs, and
+  re-cloning the resolved-effects map.
+- `MemoryCache` eviction pops an LRU index (O(log n)) instead of scanning
+  every entry per insert once full; keys are shared as `Arc`s.
+- Single-flight slots are reference-counted and removed when the last
+  guard drops — the in-flight table no longer grows by one entry per
+  distinct call for the life of the runtime.
+- Smaller: fan-out stops cloning its item array; `KeyRedactor` lowercases
+  each key once instead of once per needle; adapter-scoped capability
+  lookups stop allocating a tuple key; ref path segments only allocate
+  when they actually contain escapes.
+
 ## 0.2.0
 
 Breaking, correctness-focused rewrite of the whole pipeline. Highlights, by

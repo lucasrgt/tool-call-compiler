@@ -26,7 +26,8 @@ fn write_canonical(value: &Value, out: &mut String) {
                 if index > 0 {
                     out.push(',');
                 }
-                let _ = write!(out, "{}:", Value::String((*key).clone()));
+                write_json_string(key, out);
+                out.push(':');
                 write_canonical(&map[*key], out);
             }
             out.push('}');
@@ -41,10 +42,33 @@ fn write_canonical(value: &Value, out: &mut String) {
             }
             out.push(']');
         }
+        Value::String(text) => write_json_string(text, out),
         leaf => {
             let _ = write!(out, "{leaf}");
         }
     }
+}
+
+/// Writes `text` as a JSON string literal with `serde_json`-compatible
+/// escaping, without allocating.
+fn write_json_string(text: &str, out: &mut String) {
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if (control as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", control as u32);
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
 }
 
 #[cfg(test)]

@@ -39,53 +39,75 @@ pub struct Diagnostic {
 /// a consequence of the dependency graph, not of effect conservatism.
 /// Findings are grouped — one diagnostic per conflicting resource, and one
 /// for the whole set of nodes with missing/vacuous effects — instead of one
-/// entry per node pair.
+/// entry per node pair. Order relations are held as ancestor/descendant
+/// bitsets and conflicts are found per resource, so cost tracks actual
+/// conflicts instead of every node pair.
 pub fn explain_parallel_boundaries(plan: &Plan, graph: &ExecutionGraph) -> Vec<Diagnostic> {
-    let layer_index = layer_index(graph);
-    let ancestors = transitive_ancestors(graph);
+    let order = OrderIndex::new(graph);
     let effects = graph.resolved_effects();
 
+    // A node with missing/vacuous effects is reported when at least one
+    // other node is unordered with it across layers. Ancestors and
+    // descendants always sit in other layers, so the count of unordered
+    // cross-layer partners falls out arithmetically.
     let mut undeclared = BTreeSet::<NodeId>::new();
+    for node in &plan.nodes {
+        let Some(fx) = effects.get(&node.id) else {
+            continue;
+        };
+        if fx.declared {
+            continue;
+        }
+        let Some(index) = order.index_of(&node.id) else {
+            continue;
+        };
+        let ordered = order.ancestor_count(index) + order.descendant_count(index);
+        let unordered_cross_layer = order.total() - 1 - ordered - (order.layer_size(index) - 1);
+        if unordered_cross_layer > 0 {
+            undeclared.insert(node.id.clone());
+        }
+    }
+
+    // Group writers/readers per resource; a node joins a resource's conflict
+    // set when it is unordered across layers with a writer (or, when itself
+    // a writer, with any toucher of the resource).
+    let mut writers = BTreeMap::<&Resource, Vec<usize>>::new();
+    let mut readers = BTreeMap::<&Resource, Vec<usize>>::new();
+    for node in &plan.nodes {
+        let (Some(fx), Some(index)) = (effects.get(&node.id), order.index_of(&node.id)) else {
+            continue;
+        };
+        if !fx.declared {
+            continue;
+        }
+        for resource in &fx.writes {
+            writers.entry(resource).or_default().push(index);
+        }
+        for resource in &fx.reads {
+            readers.entry(resource).or_default().push(index);
+        }
+    }
+
     let mut conflicts = BTreeMap::<Resource, BTreeSet<NodeId>>::new();
-
-    for (left_index, left) in plan.nodes.iter().enumerate() {
-        for right in plan.nodes.iter().skip(left_index + 1) {
-            if layer_index.get(&left.id) == layer_index.get(&right.id) {
-                continue;
-            }
-            if is_ordered(&ancestors, &left.id, &right.id) {
-                continue;
-            }
-
-            let (Some(left_fx), Some(right_fx)) = (effects.get(&left.id), effects.get(&right.id))
-            else {
-                continue;
+    for (resource, writing) in &writers {
+        let reading = readers.get(*resource).map(Vec::as_slice).unwrap_or(&[]);
+        let touchers: Vec<usize> = writing.iter().chain(reading).copied().collect();
+        for &node in &touchers {
+            // Writers conflict with every other toucher; readers only with
+            // writers (read/read sharing is always safe).
+            let partners: &[usize] = if writing.contains(&node) {
+                &touchers
+            } else {
+                writing
             };
-
-            if !left_fx.declared || !right_fx.declared {
-                if !left_fx.declared {
-                    undeclared.insert(left.id.clone());
-                }
-                if !right_fx.declared {
-                    undeclared.insert(right.id.clone());
-                }
-                continue;
-            }
-
-            for resource in left_fx.writes.intersection(&right_fx.writes) {
-                let entry = conflicts.entry(resource.clone()).or_default();
-                entry.insert(left.id.clone());
-                entry.insert(right.id.clone());
-            }
-            for resource in left_fx.writes.intersection(&right_fx.reads) {
-                let entry = conflicts.entry(resource.clone()).or_default();
-                entry.insert(left.id.clone());
-                entry.insert(right.id.clone());
-            }
-            for resource in right_fx.writes.intersection(&left_fx.reads) {
-                let entry = conflicts.entry(resource.clone()).or_default();
-                entry.insert(left.id.clone());
-                entry.insert(right.id.clone());
+            let conflicting = partners
+                .iter()
+                .any(|&other| other != node && order.unordered_cross_layer(node, other));
+            if conflicting {
+                conflicts
+                    .entry((*resource).clone())
+                    .or_default()
+                    .insert(order.node_id(node).to_owned());
             }
         }
     }
@@ -110,40 +132,128 @@ pub fn explain_parallel_boundaries(plan: &Plan, graph: &ExecutionGraph) -> Vec<D
     diagnostics
 }
 
-fn layer_index(graph: &ExecutionGraph) -> BTreeMap<NodeId, usize> {
-    let mut indexes = BTreeMap::new();
-    for (index, layer) in graph.layers().iter().enumerate() {
-        for node in layer {
-            indexes.insert(node.clone(), index);
+/// Node order relations: layer membership plus transitive ancestor and
+/// descendant sets as bitsets (one row of `n/64` words per node).
+struct OrderIndex<'a> {
+    ids: Vec<&'a str>,
+    index: BTreeMap<&'a str, usize>,
+    layer_of: Vec<usize>,
+    layer_sizes: Vec<usize>,
+    words: usize,
+    ancestors: Vec<u64>,
+    descendants: Vec<u64>,
+}
+
+impl<'a> OrderIndex<'a> {
+    fn new(graph: &'a ExecutionGraph) -> Self {
+        let ids: Vec<&str> = graph
+            .layers()
+            .iter()
+            .flat_map(|layer| layer.iter().map(String::as_str))
+            .collect();
+        let index: BTreeMap<&str, usize> = ids
+            .iter()
+            .enumerate()
+            .map(|(position, id)| (*id, position))
+            .collect();
+        let mut layer_of = vec![0; ids.len()];
+        let mut layer_sizes = Vec::with_capacity(graph.layers().len());
+        for (layer_index, layer) in graph.layers().iter().enumerate() {
+            layer_sizes.push(layer.len());
+            for node in layer {
+                layer_of[index[node.as_str()]] = layer_index;
+            }
         }
-    }
-    indexes
-}
 
-fn is_ordered(ancestors: &BTreeMap<NodeId, BTreeSet<NodeId>>, left: &str, right: &str) -> bool {
-    ancestors.get(left).is_some_and(|set| set.contains(right))
-        || ancestors.get(right).is_some_and(|set| set.contains(left))
-}
-
-/// Full transitive ancestor sets, computed iteratively in topological order
-/// (the layer order is already topological).
-fn transitive_ancestors(graph: &ExecutionGraph) -> BTreeMap<NodeId, BTreeSet<NodeId>> {
-    let mut ancestors = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
-
-    for layer in graph.layers() {
-        for node in layer {
-            let mut set = BTreeSet::new();
-            if let Some(deps) = graph.dependencies().get(node) {
+        let total = ids.len();
+        let words = total.div_ceil(64);
+        // The flattened layer order is topological, so one forward pass
+        // accumulates ancestors and one backward pass descendants.
+        let mut ancestors = vec![0u64; total * words];
+        for (position, id) in ids.iter().enumerate() {
+            if let Some(deps) = graph.dependencies().get(*id) {
                 for dep in deps {
-                    set.insert(dep.clone());
-                    if let Some(dep_ancestors) = ancestors.get(dep) {
-                        set.extend(dep_ancestors.iter().cloned());
-                    }
+                    let dep_position = index[dep.as_str()];
+                    or_row(&mut ancestors, words, dep_position, position);
+                    set_bit(&mut ancestors, words, position, dep_position);
                 }
             }
-            ancestors.insert(node.clone(), set);
+        }
+        let mut descendants = vec![0u64; total * words];
+        for (position, id) in ids.iter().enumerate().rev() {
+            if let Some(deps) = graph.dependencies().get(*id) {
+                for dep in deps {
+                    let dep_position = index[dep.as_str()];
+                    or_row(&mut descendants, words, position, dep_position);
+                    set_bit(&mut descendants, words, dep_position, position);
+                }
+            }
+        }
+
+        Self {
+            ids,
+            index,
+            layer_of,
+            layer_sizes,
+            words,
+            ancestors,
+            descendants,
         }
     }
 
-    ancestors
+    fn total(&self) -> usize {
+        self.ids.len()
+    }
+
+    fn index_of(&self, node: &str) -> Option<usize> {
+        self.index.get(node).copied()
+    }
+
+    fn node_id(&self, index: usize) -> &str {
+        self.ids[index]
+    }
+
+    fn layer_size(&self, index: usize) -> usize {
+        self.layer_sizes[self.layer_of[index]]
+    }
+
+    fn ancestor_count(&self, index: usize) -> usize {
+        row(&self.ancestors, self.words, index)
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
+    }
+
+    fn descendant_count(&self, index: usize) -> usize {
+        row(&self.descendants, self.words, index)
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
+    }
+
+    fn unordered_cross_layer(&self, left: usize, right: usize) -> bool {
+        self.layer_of[left] != self.layer_of[right]
+            && !get_bit(&self.ancestors, self.words, left, right)
+            && !get_bit(&self.ancestors, self.words, right, left)
+    }
+}
+
+fn row(bits: &[u64], words: usize, index: usize) -> &[u64] {
+    &bits[index * words..(index + 1) * words]
+}
+
+fn set_bit(bits: &mut [u64], words: usize, row: usize, column: usize) {
+    bits[row * words + column / 64] |= 1 << (column % 64);
+}
+
+fn get_bit(bits: &[u64], words: usize, row: usize, column: usize) -> bool {
+    bits[row * words + column / 64] & (1 << (column % 64)) != 0
+}
+
+/// `bits[dst] |= bits[src]` for two row indexes of one matrix.
+fn or_row(bits: &mut [u64], words: usize, src: usize, dst: usize) {
+    for word in 0..words {
+        let value = bits[src * words + word];
+        bits[dst * words + word] |= value;
+    }
 }

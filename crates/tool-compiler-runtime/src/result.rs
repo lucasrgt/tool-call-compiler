@@ -232,11 +232,8 @@ impl KeyRedactor {
             Value::Object(map) => Value::Object(
                 map.iter()
                     .map(|(key, value)| {
-                        if self
-                            .keys
-                            .iter()
-                            .any(|needle| key.to_lowercase().contains(needle))
-                        {
+                        let key_lower = key.to_lowercase();
+                        if self.keys.iter().any(|needle| key_lower.contains(needle)) {
                             (key.clone(), Value::String(self.replacement.clone()))
                         } else {
                             (key.clone(), self.redact_value(value))

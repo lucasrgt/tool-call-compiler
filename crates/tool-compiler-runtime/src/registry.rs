@@ -85,7 +85,9 @@ impl ToolCapabilities {
 pub struct ToolRegistry {
     adapters: BTreeMap<String, Arc<dyn ToolExecutor>>,
     capabilities: BTreeMap<String, ToolCapabilities>,
-    adapter_capabilities: BTreeMap<(String, String), ToolCapabilities>,
+    /// Adapter-scoped capabilities, nested by adapter then tool so lookups
+    /// borrow both names instead of allocating a tuple key.
+    adapter_capabilities: BTreeMap<String, BTreeMap<String, ToolCapabilities>>,
     blocked_tools: BTreeSet<String>,
 }
 
@@ -145,7 +147,9 @@ impl ToolRegistry {
         capabilities: ToolCapabilities,
     ) {
         self.adapter_capabilities
-            .insert((adapter.into(), tool.into()), capabilities);
+            .entry(adapter.into())
+            .or_default()
+            .insert(tool.into(), capabilities);
     }
 
     /// Blocks a tool name from executing (recursion / policy guard). Nodes
@@ -168,7 +172,8 @@ impl ToolRegistry {
     /// Capabilities for `tool` under `adapter`, adapter-scoped entry first.
     pub fn capabilities_for(&self, adapter: &str, tool: &str) -> Option<&ToolCapabilities> {
         self.adapter_capabilities
-            .get(&(adapter.to_owned(), tool.to_owned()))
+            .get(adapter)
+            .and_then(|tools| tools.get(tool))
             .or_else(|| self.capabilities.get(tool))
     }
 
@@ -181,7 +186,7 @@ impl ToolRegistry {
     /// registered capabilities.
     pub(crate) fn apply_capabilities(&self, plan: &mut Plan) {
         for (tool, spec) in &mut plan.tools {
-            if let Some(capabilities) = self.capabilities_for(&spec.adapter.clone(), tool) {
+            if let Some(capabilities) = self.capabilities_for(&spec.adapter, tool) {
                 merge_capabilities(spec, capabilities);
             }
         }

@@ -15,7 +15,7 @@ use tool_compiler_ir::Resource;
 /// The version comes from `ToolSpec::version` (possibly hydrated from
 /// registry capabilities); bumping it invalidates previously cached outputs
 /// of the tool without touching other entries.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CacheKey {
     /// Adapter executing the call.
     pub adapter: String,
@@ -69,8 +69,11 @@ pub struct MemoryCache {
 }
 
 struct Inner {
-    entries: BTreeMap<CacheKey, Entry>,
-    by_resource: BTreeMap<Resource, BTreeSet<CacheKey>>,
+    entries: BTreeMap<Arc<CacheKey>, Entry>,
+    by_resource: BTreeMap<Resource, BTreeSet<Arc<CacheKey>>>,
+    /// LRU index: `last_used` tick to key. Ticks are unique (the clock only
+    /// moves forward), so eviction is popping the smallest tick.
+    lru: BTreeMap<u64, Arc<CacheKey>>,
     clock: u64,
 }
 
@@ -96,6 +99,7 @@ impl MemoryCache {
             inner: Arc::new(Mutex::new(Inner {
                 entries: BTreeMap::new(),
                 by_resource: BTreeMap::new(),
+                lru: BTreeMap::new(),
                 clock: 0,
             })),
             max_entries: max_entries.max(1),
@@ -119,6 +123,7 @@ impl Default for MemoryCache {
 impl Inner {
     fn remove(&mut self, key: &CacheKey) {
         if let Some(entry) = self.entries.remove(key) {
+            self.lru.remove(&entry.last_used);
             for resource in entry.reads {
                 if let Some(keys) = self.by_resource.get_mut(&resource) {
                     keys.remove(key);
@@ -131,15 +136,19 @@ impl Inner {
     }
 
     fn evict_least_recently_used(&mut self) {
-        let Some(victim) = self
-            .entries
-            .iter()
-            .min_by_key(|(_, entry)| entry.last_used)
-            .map(|(key, _)| key.clone())
-        else {
+        let Some((_, victim)) = self.lru.pop_first() else {
             return;
         };
-        self.remove(&victim);
+        if let Some(entry) = self.entries.remove(victim.as_ref()) {
+            for resource in entry.reads {
+                if let Some(keys) = self.by_resource.get_mut(&resource) {
+                    keys.remove(victim.as_ref());
+                    if keys.is_empty() {
+                        self.by_resource.remove(&resource);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -159,9 +168,16 @@ impl ToolCache for MemoryCache {
             return None;
         }
 
-        let entry = inner.entries.get_mut(key)?;
-        entry.last_used = clock;
-        Some(entry.output.clone())
+        let (shared_key, entry) = inner.entries.get_key_value(key)?;
+        let shared_key = Arc::clone(shared_key);
+        let previous = entry.last_used;
+        let output = Arc::clone(&entry.output);
+        inner.lru.remove(&previous);
+        inner.lru.insert(clock, shared_key);
+        if let Some(entry) = inner.entries.get_mut(key) {
+            entry.last_used = clock;
+        }
+        Some(output)
     }
 
     async fn insert(&self, key: CacheKey, output: Arc<Value>, reads: BTreeSet<Resource>) {
@@ -173,13 +189,15 @@ impl ToolCache for MemoryCache {
         while inner.entries.len() >= self.max_entries {
             inner.evict_least_recently_used();
         }
+        let key = Arc::new(key);
         for resource in &reads {
             inner
                 .by_resource
                 .entry(resource.clone())
                 .or_default()
-                .insert(key.clone());
+                .insert(Arc::clone(&key));
         }
+        inner.lru.insert(clock, Arc::clone(&key));
         inner.entries.insert(
             key,
             Entry {
@@ -193,10 +211,10 @@ impl ToolCache for MemoryCache {
 
     async fn invalidate_reads(&self, resources: &BTreeSet<Resource>) {
         let mut inner = self.lock();
-        let mut victims = BTreeSet::new();
+        let mut victims = Vec::new();
         for resource in resources {
             if let Some(keys) = inner.by_resource.get(resource) {
-                victims.extend(keys.iter().cloned());
+                victims.extend(keys.iter().map(Arc::clone));
             }
         }
         for key in victims {
@@ -208,6 +226,7 @@ impl ToolCache for MemoryCache {
         let mut inner = self.lock();
         inner.entries.clear();
         inner.by_resource.clear();
+        inner.lru.clear();
     }
 }
 

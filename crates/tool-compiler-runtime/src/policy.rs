@@ -1,6 +1,6 @@
 //! Retry, timeout, and single-flight policies around adapter calls.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -161,26 +161,64 @@ async fn with_timeout<T>(
 
 /// Coalesces concurrent executions of the same cache key: the first caller
 /// executes while later callers wait and then re-check the cache.
+///
+/// Slots are reference-counted and removed when the last guard drops, so the
+/// table only ever holds keys that are actually in flight (a long-lived
+/// runtime does not accumulate one entry per distinct call).
 #[derive(Default)]
 pub(crate) struct SingleFlight {
-    inflight: Mutex<BTreeMap<CacheKey, Arc<Mutex<()>>>>,
+    inflight: std::sync::Mutex<HashMap<CacheKey, Slot>>,
+}
+
+struct Slot {
+    lock: Arc<Mutex<()>>,
+    guards: usize,
 }
 
 impl SingleFlight {
     /// Returns a guard that serializes callers of `key`. Dropping the guard
-    /// releases the slot.
-    pub(crate) async fn acquire(&self, key: &CacheKey) -> SingleFlightGuard {
-        let slot = {
-            let mut inflight = self.inflight.lock().await;
-            inflight.entry(key.clone()).or_default().clone()
+    /// releases the slot (and frees it once no caller holds it).
+    pub(crate) async fn acquire(flight: &Arc<Self>, key: &CacheKey) -> SingleFlightGuard {
+        let lock = {
+            let mut inflight = flight.lock_table();
+            let slot = inflight.entry(key.clone()).or_insert_with(|| Slot {
+                lock: Arc::new(Mutex::new(())),
+                guards: 0,
+            });
+            slot.guards += 1;
+            Arc::clone(&slot.lock)
         };
-        let permit = slot.clone().lock_owned().await;
-        SingleFlightGuard { _permit: permit }
+        let permit = lock.lock_owned().await;
+        SingleFlightGuard {
+            flight: Arc::clone(flight),
+            key: key.clone(),
+            _permit: permit,
+        }
+    }
+
+    fn lock_table(&self) -> std::sync::MutexGuard<'_, HashMap<CacheKey, Slot>> {
+        self.inflight
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 }
 
 pub(crate) struct SingleFlightGuard {
+    flight: Arc<SingleFlight>,
+    key: CacheKey,
     _permit: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for SingleFlightGuard {
+    fn drop(&mut self) {
+        let mut inflight = self.flight.lock_table();
+        if let Some(slot) = inflight.get_mut(&self.key) {
+            slot.guards -= 1;
+            if slot.guards == 0 {
+                inflight.remove(&self.key);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

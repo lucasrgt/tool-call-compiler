@@ -11,6 +11,7 @@
 //! survive failures (per-node `errors` and `skipped` maps), and
 //! [`ResultMode::Compact`] drops internal payloads for token-tight replies.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -19,7 +20,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 use tool_compiler_graph::{ExecutionGraph, GraphError, validate};
 use tool_compiler_ir::{NodeId, Plan, ValueRef};
-use tool_compiler_optimizer::{OptimizationReport, OptimizedPlan, optimize};
+use tool_compiler_optimizer::{OptimizationReport, optimize};
 
 mod builtin;
 mod cache;
@@ -161,11 +162,17 @@ pub struct Runtime {
 }
 
 /// A plan compiled once and runnable many times (see [`Runtime::prepare`]).
+///
+/// Everything derivable from the optimized plan alone (graph, data
+/// dependencies) is computed here once and shared with each run, so cloning
+/// a `PreparedPlan` — and starting a run from it — costs reference bumps
+/// instead of deep copies.
 #[derive(Clone, Debug)]
 pub struct PreparedPlan {
-    plan: Plan,
-    graph: ExecutionGraph,
+    plan: Arc<Plan>,
+    graph: Arc<ExecutionGraph>,
     report: OptimizationReport,
+    data_deps: Arc<BTreeMap<NodeId, BTreeSet<NodeId>>>,
 }
 
 impl PreparedPlan {
@@ -225,11 +232,13 @@ impl Runtime {
     /// times with [`Runtime::run_prepared`] without re-optimizing.
     pub fn prepare(&self, mut plan: Plan) -> Result<PreparedPlan, RuntimeError> {
         self.registry.apply_capabilities(&mut plan);
-        let optimized: OptimizedPlan = optimize(plan)?;
+        let (plan, graph, report) = optimize(plan)?.into_parts();
+        let data_deps = Arc::new(engine::collect_data_deps(&plan));
         Ok(PreparedPlan {
-            plan: optimized.plan().clone(),
-            graph: optimized.graph().clone(),
-            report: optimized.report().clone(),
+            plan: Arc::new(plan),
+            graph: Arc::new(graph),
+            report,
+            data_deps,
         })
     }
 
@@ -257,8 +266,9 @@ impl Runtime {
     ) -> Result<RunResult, RuntimeError> {
         Engine::new(
             self,
-            prepared.plan.clone(),
-            &prepared.graph,
+            Arc::clone(&prepared.plan),
+            Arc::clone(&prepared.graph),
+            Arc::clone(&prepared.data_deps),
             prepared.report.clone(),
             config,
             false,
@@ -276,10 +286,12 @@ impl Runtime {
     ) -> Result<RunResult, RuntimeError> {
         self.registry.apply_capabilities(&mut plan);
         let graph = validate(&plan)?;
+        let data_deps = Arc::new(engine::collect_data_deps(&plan));
         Engine::new(
             self,
-            plan,
-            &graph,
+            Arc::new(plan),
+            Arc::new(graph),
+            data_deps,
             OptimizationReport::default(),
             config,
             false,
@@ -303,10 +315,12 @@ impl Runtime {
     ) -> Result<RunResult, RuntimeError> {
         self.registry.apply_capabilities(&mut plan);
         let graph = validate(&plan)?;
+        let data_deps = Arc::new(engine::collect_data_deps(&plan));
         Engine::new(
             self,
-            plan,
-            &graph,
+            Arc::new(plan),
+            Arc::new(graph),
+            data_deps,
             OptimizationReport::default(),
             config,
             true,

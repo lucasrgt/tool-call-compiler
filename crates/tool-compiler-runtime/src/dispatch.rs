@@ -111,7 +111,7 @@ async fn dispatch_single(
     // Single-flight: the first caller of a key executes; concurrent callers
     // wait and then re-check the cache.
     let _guard = match &key {
-        Some(key) => Some(context.single_flight.acquire(key).await),
+        Some(key) => Some(SingleFlight::acquire(&context.single_flight, key).await),
         None => None,
     };
 

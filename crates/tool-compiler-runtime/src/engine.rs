@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tool_compiler_adapter_api::{ToolExecutionError, ToolExecutor};
-use tool_compiler_graph::{ExecutionGraph, ResolvedEffects};
+use tool_compiler_graph::ExecutionGraph;
 use tool_compiler_ir::{Node, NodeId, Plan, ToolName, collect_refs};
 use tool_compiler_optimizer::OptimizationReport;
 
@@ -32,13 +32,13 @@ pub(crate) struct ContextSeed {
 
 /// The dependency-driven execution engine for one run.
 pub(crate) struct Engine {
-    pub(crate) plan: Plan,
+    pub(crate) plan: Arc<Plan>,
     pub(crate) config: RunConfig,
     pub(crate) optimization: OptimizationReport,
     pub(crate) context_seed: ContextSeed,
-    pub(crate) nodes: BTreeMap<NodeId, Arc<Node>>,
-    pub(crate) effects: BTreeMap<NodeId, ResolvedEffects>,
-    pub(crate) data_deps: BTreeMap<NodeId, BTreeSet<NodeId>>,
+    pub(crate) graph: Arc<ExecutionGraph>,
+    pub(crate) node_index: BTreeMap<NodeId, usize>,
+    pub(crate) data_deps: Arc<BTreeMap<NodeId, BTreeSet<NodeId>>>,
     pub(crate) units: Vec<Unit>,
     pub(crate) unit_deps: Vec<BTreeSet<usize>>,
     pub(crate) unit_dependents: Vec<BTreeSet<usize>>,
@@ -58,11 +58,32 @@ pub(crate) struct Engine {
     pub(crate) stop: Option<SkipReason>,
 }
 
+/// Data dependencies of each node: input `$ref`s, `for_each` sources, and
+/// `when` targets — the references whose failure poisons the node.
+pub(crate) fn collect_data_deps(plan: &Plan) -> BTreeMap<NodeId, BTreeSet<NodeId>> {
+    let mut data_deps = BTreeMap::new();
+    for node in &plan.nodes {
+        let mut deps = BTreeSet::new();
+        if let Ok(refs) = collect_refs(&node.input) {
+            deps.extend(refs.into_iter().map(|r| r.node().to_owned()));
+        }
+        if let Some(items) = &node.for_each {
+            deps.insert(items.node().to_owned());
+        }
+        if let Some(when) = &node.when {
+            deps.insert(when.target.node().to_owned());
+        }
+        data_deps.insert(node.id.clone(), deps);
+    }
+    data_deps
+}
+
 impl Engine {
     pub(crate) fn new(
         runtime: &Runtime,
-        plan: Plan,
-        graph: &ExecutionGraph,
+        plan: Arc<Plan>,
+        graph: Arc<ExecutionGraph>,
+        data_deps: Arc<BTreeMap<NodeId, BTreeSet<NodeId>>>,
         optimization: OptimizationReport,
         config: RunConfig,
         serial: bool,
@@ -96,26 +117,12 @@ impl Engine {
             }
         }
 
-        let nodes: BTreeMap<NodeId, Arc<Node>> = plan
+        let node_index: BTreeMap<NodeId, usize> = plan
             .nodes
             .iter()
-            .map(|node| (node.id.clone(), Arc::new(node.clone())))
+            .enumerate()
+            .map(|(position, node)| (node.id.clone(), position))
             .collect();
-
-        let mut data_deps = BTreeMap::new();
-        for node in nodes.values() {
-            let mut deps = BTreeSet::new();
-            if let Ok(refs) = collect_refs(&node.input) {
-                deps.extend(refs.into_iter().map(|r| r.node().to_owned()));
-            }
-            if let Some(items) = &node.for_each {
-                deps.insert(items.node().to_owned());
-            }
-            if let Some(when) = &node.when {
-                deps.insert(when.target.node().to_owned());
-            }
-            data_deps.insert(node.id.clone(), deps);
-        }
 
         let mut units: Vec<Unit> = Vec::new();
         let mut unit_of = BTreeMap::<NodeId, usize>::new();
@@ -137,10 +144,11 @@ impl Engine {
                 });
             }
         }
-        for node in nodes.values() {
-            if unit_of.contains_key(&node.id) {
+        for (id, &position) in &node_index {
+            if unit_of.contains_key(id) {
                 continue;
             }
+            let node = &plan.nodes[position];
             let index = units.len();
             let adapter = plan
                 .tools
@@ -186,7 +194,6 @@ impl Engine {
                 nodes_total: plan.nodes.len(),
                 ..RunMetrics::default()
             },
-            effects: graph.resolved_effects().clone(),
             context_seed: ContextSeed {
                 executors,
                 cache: runtime.cache().clone(),
@@ -202,7 +209,8 @@ impl Engine {
             plan,
             config,
             optimization,
-            nodes,
+            graph,
+            node_index,
             data_deps,
             units,
             unit_deps,
@@ -219,13 +227,18 @@ impl Engine {
             stop: None,
         })
     }
+
+    /// The node a settled/settling member id refers to.
+    pub(crate) fn node(&self, member: &str) -> &Node {
+        &self.plan.nodes[self.node_index[member]]
+    }
 }
 
 pub(crate) fn unit_cost(plan: &Plan, tool: &str, calls: u64) -> u64 {
-    let cost = plan
-        .tools
-        .get(tool)
-        .and_then(|spec| spec.cost.clone())
-        .unwrap_or_default();
-    cost.fixed_ms.unwrap_or(0) + cost.per_call_ms.unwrap_or(0).saturating_mul(calls)
+    let cost = plan.tools.get(tool).and_then(|spec| spec.cost.as_ref());
+    cost.and_then(|cost| cost.fixed_ms).unwrap_or(0)
+        + cost
+            .and_then(|cost| cost.per_call_ms)
+            .unwrap_or(0)
+            .saturating_mul(calls)
 }

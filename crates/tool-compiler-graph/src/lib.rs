@@ -14,6 +14,10 @@ use tool_compiler_ir::{
     resolve_resource_template, validate_node_id,
 };
 
+mod layers;
+
+use layers::safe_layers;
+
 /// Validated execution structure of a plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionGraph {
@@ -38,6 +42,36 @@ impl ExecutionGraph {
     /// Per-node effects with resource templates resolved from node inputs.
     pub fn resolved_effects(&self) -> &BTreeMap<NodeId, ResolvedEffects> {
         &self.resolved_effects
+    }
+
+    /// Rebuilds the graph after nodes were removed from the plan (dead-node
+    /// elimination). The kept nodes' dependencies and effects are unchanged
+    /// by construction, so only membership and layers need recomputing —
+    /// this skips the structural re-validation (and input re-parsing) of
+    /// [`validate`].
+    ///
+    /// Callers must guarantee that no kept node depends on a removed one;
+    /// the optimizer's reachability pass does.
+    pub fn retain(&self, kept: &BTreeSet<NodeId>) -> Result<Self, GraphError> {
+        let dependencies: BTreeMap<NodeId, BTreeSet<NodeId>> = self
+            .dependencies
+            .iter()
+            .filter(|(node, _)| kept.contains(*node))
+            .map(|(node, deps)| (node.clone(), deps.clone()))
+            .collect();
+        let resolved_effects: BTreeMap<NodeId, ResolvedEffects> = self
+            .resolved_effects
+            .iter()
+            .filter(|(node, _)| kept.contains(*node))
+            .map(|(node, effects)| (node.clone(), effects.clone()))
+            .collect();
+        let layers = safe_layers(&dependencies, &resolved_effects)?;
+
+        Ok(Self {
+            dependencies,
+            layers,
+            resolved_effects,
+        })
     }
 }
 
@@ -134,7 +168,7 @@ pub fn validate(plan: &Plan) -> Result<ExecutionGraph, GraphError> {
         })
         .collect::<BTreeMap<_, _>>();
 
-    let layers = safe_layers(&nodes, &dependencies, &resolved_effects)?;
+    let layers = safe_layers(&dependencies, &resolved_effects)?;
 
     Ok(ExecutionGraph {
         dependencies,
@@ -308,93 +342,6 @@ fn ensure_outputs_exist(plan: &Plan, nodes: &BTreeMap<&str, &Node>) -> Result<()
     }
 
     Ok(())
-}
-
-/// Builds parallel layers via Kahn's algorithm; the leftover check doubles
-/// as cycle detection, so no separate DFS pass is needed (and no recursion
-/// that could overflow on deep graphs).
-fn safe_layers(
-    nodes: &BTreeMap<&str, &Node>,
-    dependencies: &BTreeMap<NodeId, BTreeSet<NodeId>>,
-    resolved_effects: &BTreeMap<NodeId, ResolvedEffects>,
-) -> Result<Vec<Vec<NodeId>>, GraphError> {
-    let mut remaining_dependencies = dependencies.clone();
-    let dependents = reverse_dependencies(dependencies);
-    let mut ready = initial_ready(&remaining_dependencies);
-    let mut layers = Vec::new();
-    let mut emitted = BTreeSet::new();
-
-    while !ready.is_empty() {
-        let mut layer: Vec<NodeId> = Vec::new();
-
-        for candidate in ready.clone() {
-            let candidate_effects = &resolved_effects[&candidate];
-            let joins = layer
-                .iter()
-                .all(|existing| resolved_effects[existing].can_run_with(candidate_effects));
-            if joins {
-                ready.remove(&candidate);
-                layer.push(candidate);
-            }
-        }
-
-        if layer.is_empty()
-            && let Some(candidate) = ready.pop_first()
-        {
-            layer.push(candidate);
-        }
-
-        for node in &layer {
-            emitted.insert(node.clone());
-            if let Some(children) = dependents.get(node) {
-                for child in children {
-                    if let Some(deps) = remaining_dependencies.get_mut(child) {
-                        deps.remove(node);
-                        if deps.is_empty() && !emitted.contains(child) {
-                            ready.insert(child.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        layers.push(layer);
-    }
-
-    if emitted.len() != nodes.len() {
-        let missing = nodes
-            .keys()
-            .find(|node| !emitted.contains(**node))
-            .map(|node| (*node).to_owned())
-            .unwrap_or_default();
-        return Err(GraphError::Cycle(missing));
-    }
-
-    Ok(layers)
-}
-
-fn reverse_dependencies(
-    dependencies: &BTreeMap<NodeId, BTreeSet<NodeId>>,
-) -> BTreeMap<NodeId, BTreeSet<NodeId>> {
-    let mut dependents = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
-
-    for (node, deps) in dependencies {
-        for dep in deps {
-            dependents
-                .entry(dep.clone())
-                .or_default()
-                .insert(node.clone());
-        }
-    }
-
-    dependents
-}
-
-fn initial_ready(dependencies: &BTreeMap<NodeId, BTreeSet<NodeId>>) -> BTreeSet<NodeId> {
-    dependencies
-        .iter()
-        .filter_map(|(node, deps)| deps.is_empty().then_some(node.clone()))
-        .collect()
 }
 
 #[cfg(test)]

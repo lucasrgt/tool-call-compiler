@@ -74,12 +74,20 @@ impl ValueRef {
     }
 }
 
-fn escape_segment(segment: &str) -> String {
-    segment.replace('~', "~0").replace('.', "~1")
+fn escape_segment(segment: &str) -> std::borrow::Cow<'_, str> {
+    if segment.contains(['~', '.']) {
+        segment.replace('~', "~0").replace('.', "~1").into()
+    } else {
+        segment.into()
+    }
 }
 
 fn unescape_segment(segment: &str) -> String {
-    segment.replace("~1", ".").replace("~0", "~")
+    if segment.contains('~') {
+        segment.replace("~1", ".").replace("~0", "~")
+    } else {
+        segment.to_owned()
+    }
 }
 
 impl fmt::Display for ValueRef {

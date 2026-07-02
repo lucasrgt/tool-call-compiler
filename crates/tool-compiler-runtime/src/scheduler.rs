@@ -192,9 +192,10 @@ impl Engine {
     ) -> Option<Vec<PreparedMember>> {
         let members = self.units[unit].members.clone();
         let mut prepared = Vec::new();
+        let plan = Arc::clone(&self.plan);
 
         for member in members {
-            let node = self.nodes[&member].clone();
+            let node = &plan.nodes[self.node_index[&member]];
 
             if self
                 .data_deps
@@ -231,7 +232,7 @@ impl Engine {
                 continue;
             }
 
-            match self.prepare_one(&node) {
+            match self.prepare_one(node) {
                 Ok(member_dispatch) => prepared.push(member_dispatch),
                 Err(error) => self.complete_error(&member, error),
             }
@@ -244,7 +245,7 @@ impl Engine {
         Some(prepared)
     }
 
-    fn prepare_one(&self, node: &Arc<Node>) -> Result<PreparedMember, ToolExecutionError> {
+    fn prepare_one(&self, node: &Node) -> Result<PreparedMember, ToolExecutionError> {
         let input = resolve_input(&node.input, &self.outputs).map_err(resolution_error)?;
 
         let items = match &node.for_each {
@@ -282,7 +283,8 @@ impl Engine {
         let policy =
             crate::policy::CallPolicy::from_effects(effects, self.config.default_timeout_ms);
         let reads = self
-            .effects
+            .graph
+            .resolved_effects()
             .get(&node.id)
             .map(|effects| effects.reads.clone())
             .unwrap_or_default();
@@ -352,7 +354,7 @@ impl Engine {
         for (node, result) in outcome.results {
             match result {
                 Ok(output) => {
-                    if let Some(effects) = self.effects.get(&node) {
+                    if let Some(effects) = self.graph.resolved_effects().get(&node) {
                         written.extend(effects.writes.iter().cloned());
                     }
                     self.metrics.nodes_succeeded += 1;
@@ -383,7 +385,7 @@ impl Engine {
     }
 
     fn complete_error(&mut self, node: &str, error: ToolExecutionError) {
-        let tool = self.nodes[node].tool.clone();
+        let tool = self.node(node).tool.clone();
         self.push_event(
             TraceEvent::new(node, &tool, TraceStatus::Failed)
                 .with_duration(0)
@@ -393,7 +395,7 @@ impl Engine {
     }
 
     pub(crate) fn complete_skip(&mut self, node: &str, reason: SkipReason) {
-        let tool = self.nodes[node].tool.clone();
+        let tool = self.node(node).tool.clone();
         self.push_event(TraceEvent::new(node, &tool, TraceStatus::Skipped));
         self.metrics.nodes_skipped += 1;
         self.dead.insert(node.to_owned());

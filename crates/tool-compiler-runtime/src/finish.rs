@@ -17,7 +17,7 @@ impl Engine {
     pub(crate) fn finish(mut self, started: Instant) -> Result<RunResult, RuntimeError> {
         // Safety net: account for nodes that never reached any queue.
         let unsettled: Vec<NodeId> = self
-            .nodes
+            .node_index
             .keys()
             .filter(|node| !self.is_settled(node))
             .cloned()

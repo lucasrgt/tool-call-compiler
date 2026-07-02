@@ -3,12 +3,12 @@
 use std::collections::BTreeMap;
 
 use tool_compiler_graph::ExecutionGraph;
-use tool_compiler_ir::{NodeId, Plan, ToolCost};
+use tool_compiler_ir::{Plan, ToolCost};
 
 use crate::{OptimizationReport, OptimizationSummary};
 
 pub(crate) fn summarize(
-    original_nodes: &[(NodeId, String)],
+    original_tools: &[String],
     plan: &Plan,
     graph: &ExecutionGraph,
     report: &OptimizationReport,
@@ -26,14 +26,11 @@ pub(crate) fn summarize(
 
     let costs = CostModel::new(plan);
     let (estimated_serial_ms, estimated_tokens_before) = if costs.declared {
-        let serial = original_nodes
+        let serial = original_tools
             .iter()
-            .map(|(_, tool)| costs.call_ms(tool, 1))
+            .map(|tool| costs.call_ms(tool, 1))
             .sum();
-        let tokens = original_nodes
-            .iter()
-            .map(|(_, tool)| costs.tokens(tool))
-            .sum();
+        let tokens = original_tools.iter().map(|tool| costs.tokens(tool)).sum();
         (Some(serial), Some(tokens))
     } else {
         (None, None)
@@ -48,10 +45,10 @@ pub(crate) fn summarize(
     };
 
     OptimizationSummary {
-        estimated_tool_calls_before: original_nodes.len(),
+        estimated_tool_calls_before: original_tools.len(),
         estimated_tool_calls_after,
-        estimated_llm_turns_before: original_nodes.len(),
-        estimated_llm_turns_after: usize::from(!original_nodes.is_empty()),
+        estimated_llm_turns_before: original_tools.len(),
+        estimated_llm_turns_after: usize::from(!original_tools.is_empty()),
         estimated_serial_ms,
         estimated_compiled_ms,
         estimated_tokens_before,
@@ -70,22 +67,25 @@ impl<'a> CostModel<'a> {
         Self { plan, declared }
     }
 
-    fn cost(&self, tool: &str) -> ToolCost {
+    fn cost(&self, tool: &str) -> Option<&ToolCost> {
         self.plan
             .tools
             .get(tool)
-            .and_then(|spec| spec.cost.clone())
-            .unwrap_or_default()
+            .and_then(|spec| spec.cost.as_ref())
     }
 
     /// Cost of one dispatch carrying `calls` calls of `tool`.
     fn call_ms(&self, tool: &str, calls: u64) -> u64 {
         let cost = self.cost(tool);
-        cost.fixed_ms.unwrap_or(0) + cost.per_call_ms.unwrap_or(0).saturating_mul(calls)
+        cost.and_then(|cost| cost.fixed_ms).unwrap_or(0)
+            + cost
+                .and_then(|cost| cost.per_call_ms)
+                .unwrap_or(0)
+                .saturating_mul(calls)
     }
 
     fn tokens(&self, tool: &str) -> u64 {
-        u64::from(self.cost(tool).tokens.unwrap_or(0))
+        u64::from(self.cost(tool).and_then(|cost| cost.tokens).unwrap_or(0))
     }
 
     /// Layered estimate: each layer costs its slowest dispatch (assumes the
