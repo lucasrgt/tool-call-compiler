@@ -302,6 +302,34 @@ fn record_retries(
     }
 }
 
+/// Outcome reported when a dispatched unit's task panicked: every member
+/// fails with a non-retryable `panic` error.
+pub(crate) fn panicked_outcome(
+    unit: &crate::engine::Unit,
+    join_error: &tokio::task::JoinError,
+) -> DispatchOutcome {
+    let error = ToolExecutionError::new(format!("adapter panicked: {join_error}"))
+        .with_code("panic")
+        .with_retryable(false);
+    DispatchOutcome {
+        results: unit
+            .members
+            .iter()
+            .map(|member| (member.clone(), Err(error.clone())))
+            .collect(),
+        events: unit
+            .members
+            .iter()
+            .map(|member| {
+                TraceEvent::new(member, &unit.tool, TraceStatus::Failed).with_error(&error)
+            })
+            .collect(),
+        cache_hits: 0,
+        retries: 0,
+        batch_dispatches: 0,
+    }
+}
+
 /// Builds prepared members' cache/batch metadata from the plan.
 pub(crate) fn member_from_plan(
     node: &tool_compiler_ir::Node,

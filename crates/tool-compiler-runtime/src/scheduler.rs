@@ -23,8 +23,9 @@ use tool_compiler_ir::{Node, When};
 
 use crate::dispatch::{
     DispatchContext, DispatchOutcome, PreparedMember, UnitSpec, dispatch_unit, member_from_plan,
+    panicked_outcome,
 };
-use crate::engine::{Engine, Unit};
+use crate::engine::Engine;
 use crate::refs::{resolve_input, resolve_value_ref};
 use crate::result::{RunResult, SkipReason, TraceEvent, TraceStatus};
 use crate::{ErrorMode, RuntimeError};
@@ -479,27 +480,4 @@ pub(crate) fn resolution_error(error: RuntimeError) -> ToolExecutionError {
         _ => "invalid_ref",
     };
     ToolExecutionError::new(error.to_string()).with_code(code)
-}
-
-fn panicked_outcome(unit: &Unit, join_error: &tokio::task::JoinError) -> DispatchOutcome {
-    let error = ToolExecutionError::new(format!("adapter panicked: {join_error}"))
-        .with_code("panic")
-        .with_retryable(false);
-    DispatchOutcome {
-        results: unit
-            .members
-            .iter()
-            .map(|member| (member.clone(), Err(error.clone())))
-            .collect(),
-        events: unit
-            .members
-            .iter()
-            .map(|member| {
-                TraceEvent::new(member, &unit.tool, TraceStatus::Failed).with_error(&error)
-            })
-            .collect(),
-        cache_hits: 0,
-        retries: 0,
-        batch_dispatches: 0,
-    }
 }
