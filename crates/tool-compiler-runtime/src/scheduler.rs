@@ -50,9 +50,8 @@ impl Engine {
         let mut ready: ReadyQueue = remaining
             .iter()
             .enumerate()
-            .filter_map(|(unit, count)| {
-                (*count == 0).then(|| (self.ready_keys[unit], Reverse(unit)))
-            })
+            .filter(|(_, count)| **count == 0)
+            .map(|(unit, _)| (self.ready_keys[unit], Reverse(unit)))
             .collect();
         let mut blocked: Vec<usize> = Vec::new();
         let mut running: JoinSet<DispatchOutcome> = JoinSet::new();
