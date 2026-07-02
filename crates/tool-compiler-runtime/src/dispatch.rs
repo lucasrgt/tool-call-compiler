@@ -48,8 +48,11 @@ impl PreparedMember {
 }
 
 /// What a dispatched unit reports back to the engine.
+///
+/// Outputs travel as `Arc<Value>` so a value shared with the cache (or read
+/// straight from it) is never deep-copied on the way to the engine.
 pub(crate) struct DispatchOutcome {
-    pub results: Vec<(NodeId, Result<Value, ToolExecutionError>)>,
+    pub results: Vec<(NodeId, Result<Arc<Value>, ToolExecutionError>)>,
     pub events: Vec<TraceEvent>,
     pub cache_hits: usize,
     pub retries: usize,
@@ -124,9 +127,7 @@ async fn dispatch_single(
             &spec.tool,
             TraceStatus::CacheHit,
         ));
-        outcome
-            .results
-            .push((member.node, cached.as_ref().clone()).into_ok());
+        outcome.results.push((member.node, Ok(cached)));
         return;
     }
 
@@ -136,32 +137,35 @@ async fn dispatch_single(
         TraceStatus::Started,
     ));
     let started = Instant::now();
-    let result =
-        call_with_policy(&context.executor, &spec.tool, &member.input, &member.policy).await;
+    let PreparedMember {
+        node,
+        input,
+        policy,
+        reads,
+        ..
+    } = member;
+    let result = call_with_policy(&context.executor, &spec.tool, input, &policy).await;
     let duration = elapsed_ms(started);
 
-    record_retries(&member.node, &spec.tool, &result.retries, outcome);
+    record_retries(&node, &spec.tool, &result.retries, outcome);
     match result.result {
         Ok(output) => {
+            let output = Arc::new(output);
             if let Some(key) = key {
-                context
-                    .cache
-                    .insert(key, Arc::new(output.clone()), member.reads.clone())
-                    .await;
+                context.cache.insert(key, Arc::clone(&output), reads).await;
             }
             outcome.events.push(
-                TraceEvent::new(&member.node, &spec.tool, TraceStatus::Finished)
-                    .with_duration(duration),
+                TraceEvent::new(&node, &spec.tool, TraceStatus::Finished).with_duration(duration),
             );
-            outcome.results.push((member.node, Ok(output)));
+            outcome.results.push((node, Ok(output)));
         }
         Err(error) => {
             outcome.events.push(
-                TraceEvent::new(&member.node, &spec.tool, TraceStatus::Failed)
+                TraceEvent::new(&node, &spec.tool, TraceStatus::Failed)
                     .with_duration(duration)
                     .with_error(&error),
             );
-            outcome.results.push((member.node, Err(error)));
+            outcome.results.push((node, Err(error)));
         }
     }
 }
@@ -187,9 +191,7 @@ async fn dispatch_batch(
                 &spec.tool,
                 TraceStatus::CacheHit,
             ));
-            outcome
-                .results
-                .push((member.node, cached.as_ref().clone()).into_ok());
+            outcome.results.push((member.node, Ok(cached)));
             continue;
         }
         pending.push((member, key));
@@ -208,16 +210,18 @@ async fn dispatch_batch(
         );
     }
 
+    // The executed inputs are moved into the dispatch (their cache keys were
+    // computed above), not cloned.
     let inputs: Vec<BatchInput> = pending
-        .iter()
+        .iter_mut()
         .map(|(member, _)| BatchInput {
             node: member.node.clone(),
-            input: member.input.clone(),
+            input: std::mem::take(&mut member.input),
         })
         .collect();
     let policy = pending[0].0.policy.clone();
     let started = Instant::now();
-    let result = call_batch_with_policy(&context.executor, &spec.tool, &inputs, &policy).await;
+    let result = call_batch_with_policy(&context.executor, &spec.tool, inputs, &policy).await;
     let duration = elapsed_ms(started);
     outcome.retries += result.retries.len();
 
@@ -230,10 +234,11 @@ async fn dispatch_batch(
             for (member, key) in pending {
                 match by_node.remove(&member.node) {
                     Some(output) => {
+                        let output = Arc::new(output);
                         if let Some(key) = key {
                             context
                                 .cache
-                                .insert(key, Arc::new(output.clone()), member.reads.clone())
+                                .insert(key, Arc::clone(&output), member.reads)
                                 .await;
                         }
                         outcome.events.push(
@@ -294,18 +299,6 @@ fn record_retries(
                 .with_error(error)
                 .with_attempt((attempt + 1).min(u8::MAX as usize) as u8),
         );
-    }
-}
-
-trait IntoOk {
-    type Out;
-    fn into_ok(self) -> Self::Out;
-}
-
-impl IntoOk for (NodeId, Value) {
-    type Out = (NodeId, Result<Value, ToolExecutionError>);
-    fn into_ok(self) -> Self::Out {
-        (self.0, Ok(self.1))
     }
 }
 

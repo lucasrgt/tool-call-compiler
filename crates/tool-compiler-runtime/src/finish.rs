@@ -67,6 +67,10 @@ impl Engine {
                 .outputs
                 .into_iter()
                 .map(|(node, value)| {
+                    // The engine usually holds the only reference by now, so
+                    // this unwraps in place instead of deep-copying.
+                    let value = std::sync::Arc::try_unwrap(value)
+                        .unwrap_or_else(|shared| (*shared).clone());
                     let shaped = shape_output(&node, value, redactor.as_ref(), max_bytes);
                     (node, shaped)
                 })

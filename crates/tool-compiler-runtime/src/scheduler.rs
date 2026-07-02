@@ -10,8 +10,8 @@
 //! fail-fast mode), drains what is running, and returns a partial result
 //! with per-node errors and skips.
 
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -35,6 +35,11 @@ pub(crate) fn next_batch_id() -> u64 {
     BATCH_IDS.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Ready units ordered by scheduling priority (see `Engine::ready_keys`),
+/// ties broken by the lower unit index. Pops are O(log n) where the previous
+/// per-pick scan was O(n).
+type ReadyQueue = BinaryHeap<(u64, Reverse<usize>)>;
+
 impl Engine {
     pub(crate) async fn run(mut self) -> Result<RunResult, RuntimeError> {
         let started = Instant::now();
@@ -42,14 +47,16 @@ impl Engine {
         let _entered = span.enter();
 
         let mut remaining: Vec<usize> = self.unit_deps.iter().map(BTreeSet::len).collect();
-        let mut ready: Vec<usize> = remaining
+        let mut ready: ReadyQueue = remaining
             .iter()
             .enumerate()
-            .filter_map(|(unit, count)| (*count == 0).then_some(unit))
+            .filter_map(|(unit, count)| {
+                (*count == 0).then(|| (self.ready_keys[unit], Reverse(unit)))
+            })
             .collect();
         let mut blocked: Vec<usize> = Vec::new();
         let mut running: JoinSet<DispatchOutcome> = JoinSet::new();
-        let mut in_flight: BTreeMap<tokio::task::Id, usize> = BTreeMap::new();
+        let mut in_flight: HashMap<tokio::task::Id, usize> = HashMap::new();
 
         loop {
             self.schedule(
@@ -67,7 +74,7 @@ impl Engine {
                 // Nothing running: all locks and permits are free, so a
                 // blocked retry must make progress. If it does not, settle
                 // the leftovers instead of spinning.
-                ready.append(&mut blocked);
+                self.requeue(&mut blocked, &mut ready);
                 let before_running = running.len();
                 self.schedule(
                     &mut ready,
@@ -77,7 +84,10 @@ impl Engine {
                     &mut in_flight,
                 );
                 if running.len() == before_running && running.is_empty() {
-                    let leftovers: Vec<usize> = blocked.drain(..).chain(ready.drain(..)).collect();
+                    let leftovers: Vec<usize> = blocked
+                        .drain(..)
+                        .chain(ready.drain().map(|(_, Reverse(unit))| unit))
+                        .collect();
                     for unit in leftovers {
                         self.settle_unit(unit, SkipReason::NotRun, &mut remaining, &mut ready);
                     }
@@ -114,22 +124,35 @@ impl Engine {
 
             self.release(unit);
             self.absorb(outcome).await;
-            unblock(&self.unit_dependents, unit, &mut remaining, &mut ready);
-            ready.append(&mut blocked);
+            unblock(
+                &self.unit_dependents,
+                &self.ready_keys,
+                unit,
+                &mut remaining,
+                &mut ready,
+            );
+            self.requeue(&mut blocked, &mut ready);
         }
 
         self.finish(started)
     }
 
+    /// Puts blocked units back in the ready queue for another admission try.
+    fn requeue(&self, blocked: &mut Vec<usize>, ready: &mut ReadyQueue) {
+        for unit in blocked.drain(..) {
+            ready.push((self.ready_keys[unit], Reverse(unit)));
+        }
+    }
+
     fn schedule(
         &mut self,
-        ready: &mut Vec<usize>,
+        ready: &mut ReadyQueue,
         blocked: &mut Vec<usize>,
         remaining: &mut [usize],
         running: &mut JoinSet<DispatchOutcome>,
-        in_flight: &mut BTreeMap<tokio::task::Id, usize>,
+        in_flight: &mut HashMap<tokio::task::Id, usize>,
     ) {
-        while let Some(unit) = self.pick_next(ready) {
+        while let Some((_, Reverse(unit))) = ready.pop() {
             if let Some(reason) = self.stop {
                 self.settle_unit(unit, reason, remaining, ready);
                 continue;
@@ -160,27 +183,6 @@ impl Engine {
         }
     }
 
-    /// Picks the next ready unit: serial order when benchmarking serially,
-    /// otherwise highest estimated cost first (longest work starts earliest).
-    fn pick_next(&self, ready: &mut Vec<usize>) -> Option<usize> {
-        if ready.is_empty() {
-            return None;
-        }
-        let index = match &self.serial_position {
-            Some(order) => ready
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, unit)| order.get(*unit).copied().unwrap_or(usize::MAX))
-                .map(|(index, _)| index)?,
-            None => ready
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, unit)| self.units[**unit].cost)
-                .map(|(index, _)| index)?,
-        };
-        Some(ready.swap_remove(index))
-    }
-
     /// Resolves inputs and gates (`when`, blocked tools, input schemas).
     /// Members that fail or skip are settled inline; returns `None` when no
     /// member survived to dispatch.
@@ -188,21 +190,21 @@ impl Engine {
         &mut self,
         unit: usize,
         remaining: &mut [usize],
-        ready: &mut Vec<usize>,
+        ready: &mut ReadyQueue,
     ) -> Option<Vec<PreparedMember>> {
-        let members = self.units[unit].members.clone();
+        let members = Arc::clone(&self.units[unit].members);
         let mut prepared = Vec::new();
         let plan = Arc::clone(&self.plan);
 
-        for member in members {
-            let node = &plan.nodes[self.node_index[&member]];
+        for member in members.iter() {
+            let node = &plan.nodes[self.node_index[member]];
 
             if self
                 .data_deps
-                .get(&member)
+                .get(member)
                 .is_some_and(|deps| deps.iter().any(|dep| self.dead.contains(dep)))
             {
-                self.complete_skip(&member, SkipReason::FailedDependency);
+                self.complete_skip(member, SkipReason::FailedDependency);
                 continue;
             }
 
@@ -210,11 +212,11 @@ impl Engine {
                 match self.evaluate_when(when) {
                     Ok(true) => {}
                     Ok(false) => {
-                        self.complete_skip(&member, SkipReason::Condition);
+                        self.complete_skip(member, SkipReason::Condition);
                         continue;
                     }
                     Err(error) => {
-                        self.complete_error(&member, error);
+                        self.complete_error(member, error);
                         continue;
                     }
                 }
@@ -222,7 +224,7 @@ impl Engine {
 
             if self.blocked_tools.contains(&node.tool) {
                 self.complete_error(
-                    &member,
+                    member,
                     ToolExecutionError::new(format!(
                         "tool '{}' is blocked in this runtime",
                         node.tool
@@ -234,12 +236,18 @@ impl Engine {
 
             match self.prepare_one(node) {
                 Ok(member_dispatch) => prepared.push(member_dispatch),
-                Err(error) => self.complete_error(&member, error),
+                Err(error) => self.complete_error(member, error),
             }
         }
 
         if prepared.is_empty() {
-            unblock(&self.unit_dependents, unit, remaining, ready);
+            unblock(
+                &self.unit_dependents,
+                &self.ready_keys,
+                unit,
+                remaining,
+                ready,
+            );
             return None;
         }
         Some(prepared)
@@ -407,26 +415,33 @@ impl Engine {
         unit: usize,
         fallback: SkipReason,
         remaining: &mut [usize],
-        ready: &mut Vec<usize>,
+        ready: &mut ReadyQueue,
     ) {
-        for member in self.units[unit].members.clone() {
-            if !self.is_settled(&member) {
+        let members = Arc::clone(&self.units[unit].members);
+        for member in members.iter() {
+            if !self.is_settled(member) {
                 // Prefer the precise reason: a member whose data dependency
                 // already failed/skipped is a FailedDependency even when the
                 // engine is settling everything else as NotRun/Cancelled.
                 let reason = if self
                     .data_deps
-                    .get(&member)
+                    .get(member)
                     .is_some_and(|deps| deps.iter().any(|dep| self.dead.contains(dep)))
                 {
                     SkipReason::FailedDependency
                 } else {
                     fallback
                 };
-                self.complete_skip(&member, reason);
+                self.complete_skip(member, reason);
             }
         }
-        unblock(&self.unit_dependents, unit, remaining, ready);
+        unblock(
+            &self.unit_dependents,
+            &self.ready_keys,
+            unit,
+            remaining,
+            ready,
+        );
     }
 
     pub(crate) fn is_settled(&self, node: &str) -> bool {
@@ -445,14 +460,15 @@ impl Engine {
 
 fn unblock(
     unit_dependents: &[BTreeSet<usize>],
+    ready_keys: &[u64],
     unit: usize,
     remaining: &mut [usize],
-    ready: &mut Vec<usize>,
+    ready: &mut ReadyQueue,
 ) {
     for dependent in &unit_dependents[unit] {
         remaining[*dependent] = remaining[*dependent].saturating_sub(1);
         if remaining[*dependent] == 0 {
-            ready.push(*dependent);
+            ready.push((ready_keys[*dependent], Reverse(*dependent)));
         }
     }
 }

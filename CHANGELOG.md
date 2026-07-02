@@ -37,6 +37,18 @@ gate the rewrite.
   each key once instead of once per needle; adapter-scoped capability
   lookups stop allocating a tuple key; ref path segments only allocate
   when they actually contain escapes.
+- The scheduler's ready set is a priority heap (pop O(log n) instead of a
+  per-pick scan; ties break on the lower unit index deterministically).
+- Node outputs flow as `Arc<Value>` end to end: cache hits and inserts
+  stop deep-copying outputs, and full-mode `node_outputs` unwraps in place
+  when the engine holds the only reference.
+- Input-schema validators are memoized in the `ToolRegistry` by canonical
+  schema, so repeated runs stop recompiling identical JSON Schemas.
+- Retry policies move the call input into the last possible attempt —
+  zero input clones on the common single-attempt path — and batch
+  dispatches move member inputs instead of cloning them.
+- Unit member lists are shared (`Arc<[NodeId]>`); the in-flight task map
+  and the resource lock table use hash maps.
 
 ## 0.2.0
 

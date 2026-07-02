@@ -16,7 +16,9 @@ use crate::{RunConfig, Runtime, RuntimeError};
 /// One schedulable unit: a single node or an optimizer batch group.
 #[derive(Clone, Debug)]
 pub(crate) struct Unit {
-    pub(crate) members: Vec<NodeId>,
+    /// Member node ids, shared so the scheduler can iterate them while
+    /// mutating the engine without cloning the list per dispatch.
+    pub(crate) members: Arc<[NodeId]>,
     pub(crate) tool: ToolName,
     pub(crate) adapter: String,
     pub(crate) batch: bool,
@@ -43,10 +45,13 @@ pub(crate) struct Engine {
     pub(crate) unit_deps: Vec<BTreeSet<usize>>,
     pub(crate) unit_dependents: Vec<BTreeSet<usize>>,
     pub(crate) serial_position: Option<BTreeMap<usize, usize>>,
+    /// Scheduling priority per unit (higher pops first): declared cost, or
+    /// inverted serial position when benchmarking serially.
+    pub(crate) ready_keys: Vec<u64>,
     pub(crate) blocked_tools: BTreeSet<String>,
     pub(crate) validators: BTreeMap<ToolName, Arc<jsonschema::Validator>>,
 
-    pub(crate) outputs: BTreeMap<NodeId, Value>,
+    pub(crate) outputs: BTreeMap<NodeId, Arc<Value>>,
     pub(crate) dead: BTreeSet<NodeId>,
     pub(crate) errors: BTreeMap<NodeId, ToolExecutionError>,
     pub(crate) skipped: BTreeMap<NodeId, SkipReason>,
@@ -107,13 +112,15 @@ impl Engine {
                 .capabilities_for(&spec.adapter, tool)
                 .and_then(|capabilities| capabilities.input_schema.as_ref())
             {
-                let validator = jsonschema::validator_for(schema).map_err(|error| {
-                    RuntimeError::InvalidInputSchema {
-                        tool: tool.clone(),
-                        message: error.to_string(),
-                    }
-                })?;
-                validators.insert(tool.clone(), Arc::new(validator));
+                let validator =
+                    runtime
+                        .registry()
+                        .compiled_validator(schema)
+                        .map_err(|message| RuntimeError::InvalidInputSchema {
+                            tool: tool.clone(),
+                            message,
+                        })?;
+                validators.insert(tool.clone(), validator);
             }
         }
 
@@ -136,7 +143,7 @@ impl Engine {
                 }
                 units.push(Unit {
                     cost: unit_cost(&plan, &group.tool, group.nodes.len() as u64),
-                    members: group.nodes.clone(),
+                    members: group.nodes.clone().into(),
                     tool: group.tool.clone(),
                     adapter: group.adapter.clone(),
                     batch: true,
@@ -156,7 +163,7 @@ impl Engine {
                 .map(|spec| spec.adapter.clone())
                 .unwrap_or_default();
             units.push(Unit {
-                members: vec![node.id.clone()],
+                members: vec![node.id.clone()].into(),
                 tool: node.tool.clone(),
                 adapter,
                 batch: false,
@@ -179,7 +186,7 @@ impl Engine {
             }
         }
 
-        let serial_position = serial.then(|| {
+        let serial_position: Option<BTreeMap<usize, usize>> = serial.then(|| {
             graph
                 .layers()
                 .iter()
@@ -188,6 +195,14 @@ impl Engine {
                 .map(|(position, node)| (unit_of[node], position))
                 .collect()
         });
+        let ready_keys: Vec<u64> = (0..units.len())
+            .map(|unit| match &serial_position {
+                // Serial order: earlier positions must pop first, so the
+                // priority is the inverted position.
+                Some(order) => u64::MAX - order.get(&unit).copied().unwrap_or(usize::MAX) as u64,
+                None => units[unit].cost,
+            })
+            .collect();
 
         Ok(Self {
             metrics: RunMetrics {
@@ -216,6 +231,7 @@ impl Engine {
             unit_deps,
             unit_dependents,
             serial_position,
+            ready_keys,
             outputs: BTreeMap::new(),
             dead: BTreeSet::new(),
             errors: BTreeMap::new(),

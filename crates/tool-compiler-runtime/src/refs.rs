@@ -1,6 +1,7 @@
 //! Runtime reference resolution: `$ref`, `$literal`, and `$item`.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 use tool_compiler_ir::{ITEM_KEY, LITERAL_KEY, NodeId, REF_KEY, ValueRef};
@@ -12,7 +13,7 @@ use crate::RuntimeError;
 /// substituted per element during `for_each` expansion).
 pub(crate) fn resolve_input(
     value: &Value,
-    node_outputs: &BTreeMap<NodeId, Value>,
+    node_outputs: &BTreeMap<NodeId, Arc<Value>>,
 ) -> Result<Value, RuntimeError> {
     match value {
         Value::Object(map) => {
@@ -45,14 +46,16 @@ pub(crate) fn resolve_input(
     }
 }
 
-/// Resolves one reference against the recorded node outputs.
-pub(crate) fn resolve_value_ref(
+/// Resolves one reference against the recorded node outputs (shared or
+/// plain values).
+pub(crate) fn resolve_value_ref<V: std::borrow::Borrow<Value>>(
     value_ref: &ValueRef,
-    node_outputs: &BTreeMap<NodeId, Value>,
+    node_outputs: &BTreeMap<NodeId, V>,
 ) -> Result<Value, RuntimeError> {
-    let mut current = node_outputs
+    let mut current: &Value = node_outputs
         .get(value_ref.node())
-        .ok_or_else(|| RuntimeError::MissingNodeOutput(value_ref.node().to_owned()))?;
+        .ok_or_else(|| RuntimeError::MissingNodeOutput(value_ref.node().to_owned()))?
+        .borrow();
 
     for segment in value_ref.path() {
         current = step_into(current, segment).ok_or_else(|| RuntimeError::MissingPath {
@@ -176,7 +179,7 @@ mod tests {
     #[test]
     fn resolve_input_walks_arrays_and_scalars() {
         let mut outputs = BTreeMap::new();
-        outputs.insert("a".to_owned(), json!({ "items": ["x", "y"] }));
+        outputs.insert("a".to_owned(), Arc::new(json!({ "items": ["x", "y"] })));
 
         let resolved = resolve_input(
             &json!([{ "$ref": "a.output.items.1" }, 5, "text"]),
@@ -190,7 +193,7 @@ mod tests {
     #[test]
     fn resolve_value_ref_reports_missing_indexes_and_scalars() {
         let mut outputs = BTreeMap::new();
-        outputs.insert("a".to_owned(), json!({ "items": ["x"], "n": 5 }));
+        outputs.insert("a".to_owned(), Arc::new(json!({ "items": ["x"], "n": 5 })));
 
         assert!(resolve_value_ref(&ValueRef::new("a", ["items", "9"]), &outputs).is_err());
         assert!(resolve_value_ref(&ValueRef::new("a", ["items", "x"]), &outputs).is_err());

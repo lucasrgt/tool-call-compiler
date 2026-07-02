@@ -84,46 +84,64 @@ pub(crate) struct PolicyOutcome<T> {
 pub(crate) async fn call_with_policy(
     executor: &Arc<dyn ToolExecutor>,
     tool: &str,
-    input: &Value,
+    input: Value,
     policy: &CallPolicy,
 ) -> PolicyOutcome<Value> {
-    run_attempts(policy, || {
-        let executor = executor.clone();
-        let tool = tool.to_owned();
-        let input = input.clone();
-        async move { with_timeout(policy.timeout, executor.call(&tool, input)).await }
-    })
-    .await
+    let mut retries = Vec::new();
+    let mut attempt = 1u8;
+    let mut input = input;
+
+    loop {
+        // The input is cloned only while a later retry may still need it;
+        // the last possible attempt takes it by move (zero clones on the
+        // common single-attempt path).
+        let this_input = if attempt < policy.max_attempts {
+            input.clone()
+        } else {
+            std::mem::take(&mut input)
+        };
+        match with_timeout(policy.timeout, executor.call(tool, this_input)).await {
+            Ok(value) => {
+                return PolicyOutcome {
+                    result: Ok(value),
+                    retries,
+                };
+            }
+            Err(error) => {
+                if attempt >= policy.max_attempts || !policy.is_retryable(&error) {
+                    return PolicyOutcome {
+                        result: Err(error),
+                        retries,
+                    };
+                }
+                tokio::time::sleep(policy.backoff(attempt)).await;
+                retries.push(error);
+                attempt += 1;
+            }
+        }
+    }
 }
 
 pub(crate) async fn call_batch_with_policy(
     executor: &Arc<dyn ToolExecutor>,
     tool: &str,
-    inputs: &[BatchInput],
+    inputs: Vec<BatchInput>,
     policy: &CallPolicy,
 ) -> PolicyOutcome<Vec<BatchOutput>> {
-    run_attempts(policy, || {
-        let executor = executor.clone();
-        let tool = tool.to_owned();
-        let inputs = inputs.to_vec();
-        async move { with_timeout(policy.timeout, executor.call_batch(&tool, inputs)).await }
-    })
-    .await
-}
-
-async fn run_attempts<T, F, Fut>(policy: &CallPolicy, mut attempt_fn: F) -> PolicyOutcome<T>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, ToolExecutionError>>,
-{
     let mut retries = Vec::new();
     let mut attempt = 1u8;
+    let mut inputs = inputs;
 
     loop {
-        match attempt_fn().await {
-            Ok(value) => {
+        let this_batch = if attempt < policy.max_attempts {
+            inputs.clone()
+        } else {
+            std::mem::take(&mut inputs)
+        };
+        match with_timeout(policy.timeout, executor.call_batch(tool, this_batch)).await {
+            Ok(outputs) => {
                 return PolicyOutcome {
-                    result: Ok(value),
+                    result: Ok(outputs),
                     retries,
                 };
             }
@@ -267,7 +285,7 @@ mod tests {
         });
         let policy = CallPolicy::from_effects(Some(&retrying_effects(5)), None);
 
-        let outcome = call_with_policy(&executor, "t", &json!(1), &policy).await;
+        let outcome = call_with_policy(&executor, "t", json!(1), &policy).await;
 
         assert_eq!(outcome.result.unwrap(), json!(1));
         assert_eq!(outcome.retries.len(), 2);
@@ -291,7 +309,7 @@ mod tests {
         };
         let policy = CallPolicy::from_effects(Some(&effects), None);
 
-        let outcome = call_with_policy(&executor, "t", &json!(1), &policy).await;
+        let outcome = call_with_policy(&executor, "t", json!(1), &policy).await;
 
         assert!(outcome.result.is_err());
         assert!(outcome.retries.is_empty());
@@ -307,7 +325,7 @@ mod tests {
         effects.retry.as_mut().unwrap().retryable_errors = ["other_code".to_owned()].into();
         let policy = CallPolicy::from_effects(Some(&effects), None);
 
-        let outcome = call_with_policy(&executor, "t", &json!(1), &policy).await;
+        let outcome = call_with_policy(&executor, "t", json!(1), &policy).await;
 
         assert!(outcome.result.is_err());
     }
@@ -324,7 +342,7 @@ mod tests {
         let executor: Arc<dyn ToolExecutor> = Arc::new(NeverRetry);
         let policy = CallPolicy::from_effects(Some(&retrying_effects(5)), None);
 
-        let outcome = call_with_policy(&executor, "t", &json!(1), &policy).await;
+        let outcome = call_with_policy(&executor, "t", json!(1), &policy).await;
 
         assert!(outcome.result.is_err());
         assert!(outcome.retries.is_empty());
@@ -345,7 +363,7 @@ mod tests {
         effects.timeout_ms = Some(5);
         let policy = CallPolicy::from_effects(Some(&effects), None);
 
-        let outcome = call_with_policy(&executor, "t", &json!(1), &policy).await;
+        let outcome = call_with_policy(&executor, "t", json!(1), &policy).await;
 
         let error = outcome.result.unwrap_err();
         assert_eq!(error.code.as_deref(), Some("timeout"));

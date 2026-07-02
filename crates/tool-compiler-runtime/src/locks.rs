@@ -6,14 +6,14 @@
 //! `tool-compiler-graph`: reads share, writes exclude, and same-tool
 //! commutative writes overlap each other.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeSet, HashMap};
 
 use tool_compiler_graph::ResolvedEffects;
 use tool_compiler_ir::Resource;
 
 #[derive(Debug, Default)]
 pub(crate) struct LockTable {
-    resources: BTreeMap<Resource, LockState>,
+    resources: HashMap<Resource, LockState>,
     /// Number of running units; used by undeclared-effects units, which
     /// require global exclusivity.
     running: usize,

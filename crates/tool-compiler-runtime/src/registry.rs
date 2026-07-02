@@ -1,12 +1,12 @@
 //! Adapter and capability registry.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tool_compiler_adapter_api::ToolExecutor;
-use tool_compiler_ir::{Effects, Plan, ToolCost, ToolLimits, ToolSpec};
+use tool_compiler_ir::{Effects, Plan, ToolCost, ToolLimits, ToolSpec, canonical_json_string};
 
 use crate::builtin::{BuiltinExecutor, register_builtin_capabilities};
 
@@ -89,6 +89,10 @@ pub struct ToolRegistry {
     /// borrow both names instead of allocating a tuple key.
     adapter_capabilities: BTreeMap<String, BTreeMap<String, ToolCapabilities>>,
     blocked_tools: BTreeSet<String>,
+    /// Compiled input-schema validators, memoized by canonical schema. A
+    /// validator is a pure function of its schema, so sharing the memo
+    /// across clones is never observable — it only skips recompilation.
+    validator_cache: Arc<Mutex<HashMap<String, Arc<jsonschema::Validator>>>>,
 }
 
 impl ToolRegistry {
@@ -194,6 +198,26 @@ impl ToolRegistry {
 
     pub(crate) fn executor(&self, adapter: &str) -> Option<Arc<dyn ToolExecutor>> {
         self.adapters.get(adapter).cloned()
+    }
+
+    /// Compiles the validator for `schema`, reusing a previously compiled
+    /// one when the same schema was seen before.
+    pub(crate) fn compiled_validator(
+        &self,
+        schema: &Value,
+    ) -> Result<Arc<jsonschema::Validator>, String> {
+        let key = canonical_json_string(schema);
+        let mut cache = self
+            .validator_cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(validator) = cache.get(&key) {
+            return Ok(Arc::clone(validator));
+        }
+        let validator =
+            Arc::new(jsonschema::validator_for(schema).map_err(|error| error.to_string())?);
+        cache.insert(key, Arc::clone(&validator));
+        Ok(validator)
     }
 
     /// Returns the executor registered for `adapter`, for direct use (for
